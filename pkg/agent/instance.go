@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-        "github.com/sipeed/picoclaw/pkg/bus"
+    "github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
@@ -57,7 +57,7 @@ func NewAgentInstance(
 	defaults *config.AgentDefaults,
 	cfg *config.Config,
 	provider providers.LLMProvider,
-        messageBus *bus.MessageBus,
+    messageBus *bus.MessageBus,
 ) *AgentInstance {
 	workspace := resolveAgentWorkspace(agentCfg, defaults)
 	os.MkdirAll(workspace, 0o755)
