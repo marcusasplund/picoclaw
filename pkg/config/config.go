@@ -84,7 +84,7 @@ type Config struct {
 	Providers ProvidersConfig `json:"providers,omitempty"`
 	ModelList []ModelConfig   `json:"model_list"` // New model-centric provider configuration
 	Gateway   GatewayConfig   `json:"gateway"`
-        SMSGatewayURL string      `json:"sms_gateway_url"`
+    SMSGatewayURL string      `json:"sms_gateway_url"`
 	Tools     ToolsConfig     `json:"tools"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 	Devices   DevicesConfig   `json:"devices"`
@@ -292,7 +292,7 @@ type ChannelsConfig struct {
 	QQ         QQConfig         `json:"qq"`
 	DingTalk   DingTalkConfig   `json:"dingtalk"`
 	Slack      SlackConfig      `json:"slack"`
-        SMS        SMSConfig        `json:"sms"`
+    SMS        SMSConfig        `json:"sms"`
 	Matrix     MatrixConfig     `json:"matrix"`
 	LINE       LINEConfig       `json:"line"`
 	OneBot     OneBotConfig     `json:"onebot"`
