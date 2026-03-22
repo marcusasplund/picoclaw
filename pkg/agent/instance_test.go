@@ -33,7 +33,7 @@ func TestNewAgentInstance_UsesDefaultsTemperatureAndMaxTokens(t *testing.T) {
 	cfg.Agents.Defaults.Temperature = &configuredTemp
 
 	provider := &mockProvider{}
-	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider, nil)
 
 	if agent.MaxTokens != 1234 {
 		t.Fatalf("MaxTokens = %d, want %d", agent.MaxTokens, 1234)
@@ -65,7 +65,7 @@ func TestNewAgentInstance_DefaultsTemperatureWhenZero(t *testing.T) {
 	cfg.Agents.Defaults.Temperature = &configuredTemp
 
 	provider := &mockProvider{}
-	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider, nil)
 
 	if agent.Temperature != 0.0 {
 		t.Fatalf("Temperature = %f, want %f", agent.Temperature, 0.0)
@@ -91,7 +91,7 @@ func TestNewAgentInstance_DefaultsTemperatureWhenUnset(t *testing.T) {
 	}
 
 	provider := &mockProvider{}
-	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider, nil)
 
 	if agent.Temperature != 0.7 {
 		t.Fatalf("Temperature = %f, want %f", agent.Temperature, 0.7)
@@ -150,7 +150,7 @@ func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 			}
 
 			provider := &mockProvider{}
-			agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+			agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider, nil)
 
 			if len(agent.Candidates) != 1 {
 				t.Fatalf("len(Candidates) = %d, want 1", len(agent.Candidates))

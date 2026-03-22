@@ -25,6 +25,7 @@ import (
 	_ "github.com/sipeed/picoclaw/pkg/channels/pico"
 	_ "github.com/sipeed/picoclaw/pkg/channels/qq"
 	_ "github.com/sipeed/picoclaw/pkg/channels/slack"
+        _ "github.com/sipeed/picoclaw/pkg/channels/sms"
 	_ "github.com/sipeed/picoclaw/pkg/channels/telegram"
 	_ "github.com/sipeed/picoclaw/pkg/channels/wecom"
 	_ "github.com/sipeed/picoclaw/pkg/channels/weixin"
@@ -407,7 +408,7 @@ func handleConfigReload(
 	reloadCtx, reloadCancel := context.WithTimeout(context.Background(), providerReloadTimeout)
 	defer reloadCancel()
 
-	if err := al.ReloadProviderAndConfig(reloadCtx, newProvider, newCfg); err != nil {
+	if err := al.ReloadProviderAndConfig(reloadCtx, newProvider, newCfg, msgBus); err != nil {
 		logger.Errorf("  ⚠ Error reloading agent loop: %v", err)
 		if cp, ok := newProvider.(providers.StatefulProvider); ok {
 			cp.Close()

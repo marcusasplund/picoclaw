@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+        "github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
@@ -56,6 +57,7 @@ func NewAgentInstance(
 	defaults *config.AgentDefaults,
 	cfg *config.Config,
 	provider providers.LLMProvider,
+        messageBus *bus.MessageBus,
 ) *AgentInstance {
 	workspace := resolveAgentWorkspace(agentCfg, defaults)
 	os.MkdirAll(workspace, 0o755)
@@ -98,7 +100,9 @@ func NewAgentInstance(
 	if cfg.Tools.IsToolEnabled("append_file") {
 		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
 	}
-
+	if cfg.Channels.SMS.Enabled {
+		toolsRegistry.Register(tools.NewSendSMSTool(messageBus, cfg))
+	}
 	sessionsDir := filepath.Join(workspace, "sessions")
 	sessions := initSessionStore(sessionsDir)
 

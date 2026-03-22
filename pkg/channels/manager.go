@@ -356,6 +356,10 @@ func (m *Manager) initChannels(channels *config.ChannelsConfig) error {
 		m.initChannel("slack", "Slack")
 	}
 
+	if channels.SMS.Enabled && channels.SMS.GatewayURL != "" {
+		m.initChannel("sms", "SMS")
+	}
+
 	if channels.Matrix.Enabled &&
 		m.config.Channels.Matrix.Homeserver != "" &&
 		m.config.Channels.Matrix.UserID != "" &&

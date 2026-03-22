@@ -85,7 +85,7 @@ func NewAgentLoop(
 	msgBus *bus.MessageBus,
 	provider providers.LLMProvider,
 ) *AgentLoop {
-	registry := NewAgentRegistry(cfg, provider)
+	registry := NewAgentRegistry(cfg, provider, msgBus)
 
 	// Register shared tools to all agents
 	registerSharedTools(cfg, msgBus, registry, provider)
@@ -385,6 +385,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
 	cfg *config.Config,
+        msgBus *bus.MessageBus,
 ) error {
 	// Validate inputs
 	if provider == nil {
@@ -410,7 +411,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 			close(done)
 		}()
 
-		registry = NewAgentRegistry(cfg, provider)
+		registry = NewAgentRegistry(cfg, provider, msgBus)
 	}()
 
 	// Wait for completion or context cancellation

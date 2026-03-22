@@ -3,6 +3,7 @@ package agent
 import (
 	"sync"
 
+        "github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -15,16 +16,19 @@ type AgentRegistry struct {
 	agents   map[string]*AgentInstance
 	resolver *routing.RouteResolver
 	mu       sync.RWMutex
+        messageBus *bus.MessageBus
 }
 
 // NewAgentRegistry creates a registry from config, instantiating all agents.
 func NewAgentRegistry(
 	cfg *config.Config,
 	provider providers.LLMProvider,
+        messageBus *bus.MessageBus,
 ) *AgentRegistry {
 	registry := &AgentRegistry{
 		agents:   make(map[string]*AgentInstance),
 		resolver: routing.NewRouteResolver(cfg),
+                messageBus: messageBus,
 	}
 
 	agentConfigs := cfg.Agents.List
@@ -33,14 +37,14 @@ func NewAgentRegistry(
 			ID:      "main",
 			Default: true,
 		}
-		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider)
+                instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, messageBus)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
 		for i := range agentConfigs {
 			ac := &agentConfigs[i]
 			id := routing.NormalizeAgentID(ac.ID)
-			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider)
+			instance := NewAgentInstance(ac, &cfg.Agents.Defaults, cfg, provider, messageBus)
 			registry.agents[id] = instance
 			logger.InfoCF("agent", "Registered agent",
 				map[string]any{

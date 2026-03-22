@@ -291,6 +291,7 @@ type ChannelsConfig struct {
 	QQ         QQConfig         `json:"qq"`
 	DingTalk   DingTalkConfig   `json:"dingtalk"`
 	Slack      SlackConfig      `json:"slack"`
+        SMS        SMSConfig        `json:"sms"`
 	Matrix     MatrixConfig     `json:"matrix"`
 	LINE       LINEConfig       `json:"line"`
 	OneBot     OneBotConfig     `json:"onebot"`
@@ -349,6 +350,18 @@ type TelegramConfig struct {
 	UseMarkdownV2      bool                `json:"use_markdown_v2"         env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 }
 
+type SMSConfig struct {
+	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_SMS_ENABLED"`
+	GatewayURL         string              `json:"gateway_url"             env:"PICOCLAW_CHANNELS_SMS_GATEWAY_URL"`
+	APIKey             string              `json:"api_key"                 env:"PICOCLAW_CHANNELS_SMS_API_KEY"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_SMS_ALLOW_FROM"`
+	PollInterval       int                 `json:"poll_interval"           env:"PICOCLAW_CHANNELS_SMS_POLL_INTERVAL"`
+	TimeoutSeconds     int                 `json:"timeout_seconds"         env:"PICOCLAW_CHANNELS_SMS_TIMEOUT_SECONDS"`
+	DeleteAfterRead    bool                `json:"delete_after_read"       env:"PICOCLAW_CHANNELS_SMS_DELETE_AFTER_READ"`
+	Typing             TypingConfig        `json:"typing,omitempty"`
+	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
+	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_SMS_REASONING_CHANNEL_ID"`
+}
 type FeishuConfig struct {
 	Enabled             bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_FEISHU_ENABLED"`
 	AppID               string              `json:"app_id"                  env:"PICOCLAW_CHANNELS_FEISHU_APP_ID"`
