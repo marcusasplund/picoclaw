@@ -37,7 +37,7 @@ func NewAgentRegistry(
 			ID:      "main",
 			Default: true,
 		}
-                instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, messageBus)
+        instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, messageBus)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
