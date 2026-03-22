@@ -385,7 +385,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	ctx context.Context,
 	provider providers.LLMProvider,
 	cfg *config.Config,
-        msgBus *bus.MessageBus,
+    msgBus *bus.MessageBus,
 ) error {
 	// Validate inputs
 	if provider == nil {
