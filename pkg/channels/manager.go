@@ -643,6 +643,10 @@ func (m *Manager) sendWithRetry(ctx context.Context, name string, w *channelWork
 		}
 		// SMS: don't blindly retry modem/gateway failures
 		if name == "sms" {
+			logger.ErrorCF("channels", "SMS retry disabled, stopping after first failure", map[string]any{
+				"chat_id": msg.ChatID,
+				"error":   lastErr.Error(),
+			})
 			break
 		}
 
