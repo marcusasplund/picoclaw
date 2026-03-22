@@ -3,7 +3,7 @@ package agent
 import (
 	"sync"
 
-        "github.com/sipeed/picoclaw/pkg/bus"
+    "github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -16,14 +16,14 @@ type AgentRegistry struct {
 	agents   map[string]*AgentInstance
 	resolver *routing.RouteResolver
 	mu       sync.RWMutex
-        messageBus *bus.MessageBus
+    messageBus *bus.MessageBus
 }
 
 // NewAgentRegistry creates a registry from config, instantiating all agents.
 func NewAgentRegistry(
 	cfg *config.Config,
 	provider providers.LLMProvider,
-        messageBus *bus.MessageBus,
+    messageBus *bus.MessageBus,
 ) *AgentRegistry {
 	registry := &AgentRegistry{
 		agents:   make(map[string]*AgentInstance),
