@@ -641,6 +641,10 @@ func (m *Manager) sendWithRetry(ctx context.Context, name string, w *channelWork
 		if lastErr == nil {
 			return
 		}
+		// SMS: don't blindly retry modem/gateway failures
+		if name == "sms" {
+			break
+		}
 
 		// Permanent failures — don't retry
 		if errors.Is(lastErr, ErrNotRunning) || errors.Is(lastErr, ErrSendFailed) {
