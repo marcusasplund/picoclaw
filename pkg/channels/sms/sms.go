@@ -41,6 +41,7 @@ type SMSChannel struct {
 	httpClient *http.Client
 	ctx        context.Context
 	cancel     context.CancelFunc
+        peer       bus.Peer
 }
 
 func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChannel, error) {
@@ -74,11 +75,11 @@ func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChanne
 	return ch, nil
 }
 
-func (c *SMSChannel) Start(ctx context.Context) error {
+func (c *SMSChannel) Start(ctx context.Context, peer bus.Peer) error {
 	logger.InfoC("sms", "Starting SMS channel")
 
 	c.ctx, c.cancel = context.WithCancel(ctx)
-
+        c.peer = peer
 	go c.pollLoop()
 
 	c.SetRunning(true)
@@ -129,42 +130,54 @@ func (c *SMSChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 }
 
 func (c *SMSChannel) pollLoop() {
-	interval := c.config.PollInterval
-	if interval <= 0 {
-		interval = 15
-	}
+        interval := c.config.PollInterval
+        if interval <= 0 {
+                interval = 15
+        }
 
-	ticker := time.NewTicker(time.Duration(interval) * time.Second)
-	defer ticker.Stop()
+        logger.InfoCF("sms", "Starting poll loop", map[string]any{
+                "interval_seconds": interval,
+        })
 
-	// Run once immediately
-	c.pollOnce()
+        ticker := time.NewTicker(time.Duration(interval) * time.Second)
+        defer ticker.Stop()
 
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			c.pollOnce()
-		}
-	}
+        logger.DebugC("sms", "Running initial pollOnce")
+        c.pollOnce()
+
+        for {
+                select {
+                case <-c.ctx.Done():
+                        logger.InfoC("sms", "Stopping poll loop")
+                        return
+                case <-ticker.C:
+                        logger.DebugC("sms", "Ticker fired, running pollOnce")
+                        c.pollOnce()
+                }
+        }
 }
 
 func (c *SMSChannel) pollOnce() {
-	ctx, cancel := context.WithTimeout(c.ctx, c.httpClient.Timeout)
-	defer cancel()
+        logger.DebugC("sms", "pollOnce entered")
 
-	var resp unreadResponse
-	if err := c.doJSON(ctx, http.MethodGet, "/sms/unread", nil, &resp); err != nil {
-		logger.ErrorCF("sms", "Failed to fetch unread SMS", map[string]any{
-			"error": err.Error(),
-		})
-		return
-	}
+        ctx, cancel := context.WithTimeout(c.ctx, c.httpClient.Timeout)
+        defer cancel()
 
-	for _, sms := range resp.Messages {
-		c.handleInboundSMS(sms)
-	}
+        var resp unreadResponse
+        if err := c.doJSON(ctx, http.MethodGet, "/sms/unread", nil, &resp); err != nil {
+                logger.ErrorCF("sms", "Failed to fetch unread SMS", map[string]any{
+                        "error": err.Error(),
+                })
+                return
+        }
+
+        logger.DebugCF("sms", "Fetched unread SMS", map[string]any{
+                "count": len(resp.Messages),
+        })
+
+        for _, sms := range resp.Messages {
+                c.handleInboundSMS(sms)
+        }
 }
 
 func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
@@ -181,12 +194,30 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 	}
 
 	if !c.IsAllowedSender(sender) {
-		logger.DebugCF("sms", "Message rejected by allowlist", map[string]any{
-			"number": number,
+	logger.DebugCF("sms", "Message rejected by allowlist", map[string]any{
+		"number": number,
+		"index":  sms.Index,
+	})
+
+	if c.config.DeleteAfterRead {
+		logger.DebugCF("sms", "Deleting rejected SMS", map[string]any{
+			"index": sms.Index,
 		})
-		return
+
+		if err := c.deleteSMS(c.ctx, sms.Index); err != nil {
+			logger.ErrorCF("sms", "Failed to delete rejected SMS", map[string]any{
+				"index": sms.Index,
+				"error": err.Error(),
+			})
+		} else {
+			logger.DebugCF("sms", "Deleted rejected SMS", map[string]any{
+				"index": sms.Index,
+			})
+		}
 	}
 
+	return
+}
 	peer := bus.Peer{
 		Kind: "direct",
 		ID:   number,
@@ -211,7 +242,7 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 
 	c.HandleMessage(
 		c.ctx,
-		peer,
+		c.peer,
 		messageID,
 		number,
 		chatID,
