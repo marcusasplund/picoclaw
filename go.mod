@@ -3,8 +3,8 @@ module github.com/sipeed/picoclaw
 go 1.25.8
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	fyne.io/systray v1.12.0
+	github.com/BurntSushi/toml v1.6.0
 	github.com/adhocore/gronx v1.19.6
 	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/bwmarrin/discordgo v0.29.0
@@ -96,5 +96,5 @@ require (
 	golang.org/x/crypto v0.49.0
 	golang.org/x/net v0.52.0
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.42.0
 )
