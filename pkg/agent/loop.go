@@ -1734,7 +1734,8 @@ turnLoop:
 			select {
 			case result, ok := <-ts.pendingResults:
 				if ok && result != nil && result.ForLLM != "" {
-					msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", result.ForLLM)}
+					content := al.cfg.FilterSensitiveData(result.ForLLM)
+					msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", content)}
 					pendingMessages = append(pendingMessages, msg)
 				}
 			default:
@@ -2092,9 +2093,13 @@ turnLoop:
 			}
 		}
 
+		reasoningContent := response.Reasoning
+		if reasoningContent == "" {
+			reasoningContent = response.ReasoningContent
+		}
 		go al.handleReasoning(
 			turnCtx,
-			response.Reasoning,
+			reasoningContent,
 			ts.channel,
 			al.targetReasoningChannelID(ts.channel),
 		)
@@ -2337,6 +2342,9 @@ turnLoop:
 					return
 				}
 
+				// Filter sensitive data before publishing
+				content = al.cfg.FilterSensitiveData(content)
+
 				logger.InfoCF("agent", "Async tool completed, publishing result",
 					map[string]any{
 						"tool":        asyncToolName,
@@ -2452,6 +2460,11 @@ turnLoop:
 				contentForLLM = toolResult.Err.Error()
 			}
 
+			// Filter sensitive data (API keys, tokens, secrets) before sending to LLM
+			if al.cfg.Tools.IsFilterSensitiveDataEnabled() {
+				contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
+			}
+
 			toolResultMsg := providers.Message{
 				Role:       "tool",
 				Content:    contentForLLM,
@@ -2529,7 +2542,8 @@ turnLoop:
 				select {
 				case result, ok := <-ts.pendingResults:
 					if ok && result != nil && result.ForLLM != "" {
-						msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", result.ForLLM)}
+						content := al.cfg.FilterSensitiveData(result.ForLLM)
+						msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", content)}
 						messages = append(messages, msg)
 						ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
 					}
