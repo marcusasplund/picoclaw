@@ -42,6 +42,7 @@ func DefaultConfig() *Config {
 					Enabled:       true,
 					MaxArgsLength: 300,
 				},
+				SplitOnMarker: false,
 			},
 		},
 		Bindings: []AgentBinding{},
@@ -62,7 +63,7 @@ func DefaultConfig() *Config {
 				Typing:    TypingConfig{Enabled: true},
 				Placeholder: PlaceholderConfig{
 					Enabled: true,
-					Text:    "Thinking... 💭",
+					Text:    FlexibleStringSlice{"Thinking... 💭"},
 				},
 				Streaming:     StreamingConfig{Enabled: true, ThrottleSeconds: 3, MinGrowthChars: 200},
 				UseMarkdownV2: false,
@@ -111,7 +112,7 @@ func DefaultConfig() *Config {
 				},
 				Placeholder: PlaceholderConfig{
 					Enabled: true,
-					Text:    "Thinking... 💭",
+					Text:    FlexibleStringSlice{"Thinking... 💭"},
 				},
 				CryptoDatabasePath: "",
 				CryptoPassphrase:   "",
