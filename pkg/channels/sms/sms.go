@@ -41,7 +41,7 @@ type SMSChannel struct {
 	httpClient *http.Client
 	ctx        context.Context
 	cancel     context.CancelFunc
-    peer       bus.Peer
+        peer       bus.Peer
 }
 
 func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChannel, error) {
@@ -75,11 +75,11 @@ func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChanne
 	return ch, nil
 }
 
-func (c *SMSChannel) Start(ctx context.Context, peer bus.Peer) error {
+func (c *SMSChannel) Start(ctx context.Context) error {
 	logger.InfoC("sms", "Starting SMS channel")
 
 	c.ctx, c.cancel = context.WithCancel(ctx)
-    c.peer = peer
+        c.peer = peer
 	go c.pollLoop()
 
 	c.SetRunning(true)
@@ -242,7 +242,7 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 
 	c.HandleMessage(
 		c.ctx,
-		c.peer,
+		peer,
 		messageID,
 		number,
 		chatID,
