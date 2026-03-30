@@ -200,7 +200,7 @@ func NewMatrixChannel(
 ) (*MatrixChannel, error) {
 	homeserver := strings.TrimSpace(cfg.Homeserver)
 	userID := strings.TrimSpace(cfg.UserID)
-	accessToken := strings.TrimSpace(cfg.AccessToken())
+	accessToken := strings.TrimSpace(cfg.AccessToken.String())
 	if homeserver == "" {
 		return nil, fmt.Errorf("matrix homeserver is required")
 	}
@@ -374,8 +374,9 @@ func (c *MatrixChannel) initCrypto(ctx context.Context) error {
 }
 
 func markdownToHTML(md string) string {
-	p := parser.NewWithExtensions(parser.CommonExtensions | parser.AutoHeadingIDs)
-	renderer := mdhtml.NewRenderer(mdhtml.RendererOptions{Flags: mdhtml.CommonFlags})
+	extensions := (parser.CommonExtensions | parser.NoEmptyLineBeforeBlock) &^ parser.DefinitionLists
+	p := parser.NewWithExtensions(extensions)
+	renderer := mdhtml.NewRenderer(mdhtml.RendererOptions{Flags: mdhtml.UseXHTML})
 	return strings.TrimSpace(string(markdown.ToHTML([]byte(md), p, renderer)))
 }
 
