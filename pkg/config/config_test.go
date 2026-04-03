@@ -317,6 +317,13 @@ func TestDefaultConfig_WebTools(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_ReadFileMode(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Tools.ReadFile.EffectiveMode() != ReadFileModeBytes {
+		t.Fatalf("expected default read_file mode %q, got %q", ReadFileModeBytes, cfg.Tools.ReadFile.EffectiveMode())
+	}
+}
+
 func TestSaveConfig_FilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("file permission bits are not enforced on Windows")
@@ -1415,6 +1422,38 @@ func TestConfigLogLevelEmpty(t *testing.T) {
 	// When config omits log_level, the DefaultConfig value ("fatal") is preserved.
 	if cfg.Gateway.LogLevel != "warn" {
 		t.Errorf("LogLevel = %q, want \"fatal\"", cfg.Gateway.LogLevel)
+	}
+}
+
+func TestResolveGatewayLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	data := `{"version":1,"gateway":{"log_level":"debug"}}`
+	if err := os.WriteFile(cfgPath, []byte(data), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if got := ResolveGatewayLogLevel(cfgPath); got != "debug" {
+		t.Fatalf("ResolveGatewayLogLevel() = %q, want %q", got, "debug")
+	}
+}
+
+func TestResolveGatewayLogLevel_UsesEnvOverrideAndNormalizesInvalid(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	data := `{"version":1,"gateway":{"log_level":"debug"}}`
+	if err := os.WriteFile(cfgPath, []byte(data), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	t.Setenv("PICOCLAW_LOG_LEVEL", "warning")
+	if got := ResolveGatewayLogLevel(cfgPath); got != "warn" {
+		t.Fatalf("ResolveGatewayLogLevel() with env override = %q, want %q", got, "warn")
+	}
+
+	t.Setenv("PICOCLAW_LOG_LEVEL", "garbage")
+	if got := ResolveGatewayLogLevel(cfgPath); got != DefaultGatewayLogLevel {
+		t.Fatalf("ResolveGatewayLogLevel() with invalid env override = %q, want %q", got, DefaultGatewayLogLevel)
 	}
 }
 
