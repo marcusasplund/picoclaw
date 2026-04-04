@@ -364,16 +364,16 @@ func (c *TelegramConfig) SetToken(token string) {
 }
 
 type SMSConfig struct {
-	Enabled            bool                `json:"enabled"                 env:"PICOCLAW_CHANNELS_SMS_ENABLED"`
-	GatewayURL         string              `json:"gateway_url"             env:"PICOCLAW_CHANNELS_SMS_GATEWAY_URL"`
-	APIKey             string              `json:"api_key"                 env:"PICOCLAW_CHANNELS_SMS_API_KEY"`
-	AllowFrom          FlexibleStringSlice `json:"allow_from"              env:"PICOCLAW_CHANNELS_SMS_ALLOW_FROM"`
-	PollInterval       int                 `json:"poll_interval"           env:"PICOCLAW_CHANNELS_SMS_POLL_INTERVAL"`
-	TimeoutSeconds     int                 `json:"timeout_seconds"         env:"PICOCLAW_CHANNELS_SMS_TIMEOUT_SECONDS"`
-	DeleteAfterRead    bool                `json:"delete_after_read"       env:"PICOCLAW_CHANNELS_SMS_DELETE_AFTER_READ"`
-	Typing             TypingConfig        `json:"typing,omitempty"`
-	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"`
-	ReasoningChannelID string              `json:"reasoning_channel_id"    env:"PICOCLAW_CHANNELS_SMS_REASONING_CHANNEL_ID"`
+	Enabled            bool                `json:"enabled"                 yaml:"-"                       env:"PICOCLAW_CHANNELS_SMS_ENABLED"`
+	GatewayURL         string              `json:"gateway_url"             yaml:"gateway_url,omitempty"   env:"PICOCLAW_CHANNELS_SMS_GATEWAY_URL"`
+	APIKey             string              `json:"api_key"                 yaml:"api_key,omitempty"       env:"PICOCLAW_CHANNELS_SMS_API_KEY"`
+	AllowFrom          FlexibleStringSlice `json:"allow_from"              yaml:"-"                       env:"PICOCLAW_CHANNELS_SMS_ALLOW_FROM"`
+	PollInterval       int                 `json:"poll_interval"           yaml:"poll_interval,omitempty" env:"PICOCLAW_CHANNELS_SMS_POLL_INTERVAL"`
+	TimeoutSeconds     int                 `json:"timeout_seconds"         yaml:"timeout_seconds,omitempty" env:"PICOCLAW_CHANNELS_SMS_TIMEOUT_SECONDS"`
+	DeleteAfterRead    bool                `json:"delete_after_read"       yaml:"delete_after_read,omitempty" env:"PICOCLAW_CHANNELS_SMS_DELETE_AFTER_READ"`
+	Typing             TypingConfig        `json:"typing,omitempty"        yaml:"-"`
+	Placeholder        PlaceholderConfig   `json:"placeholder,omitempty"   yaml:"-"`
+	ReasoningChannelID string              `json:"reasoning_channel_id"    yaml:"-" env:"PICOCLAW_CHANNELS_SMS_REASONING_CHANNEL_ID"`
 }
 
 type FeishuConfig struct {

@@ -233,6 +233,49 @@ func TestLoadConfig_MCPMaxInlineTextChars(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_SMSGatewayURLFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yml")
+	raw := `version: 2
+channels:
+  sms:
+    gateway_url: "http://127.0.0.1:8080"
+    api_key: "secret"
+    poll_interval: 7
+    timeout_seconds: 11
+    delete_after_read: true
+`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	t.Setenv("PICOCLAW_CHANNELS_SMS_ENABLED", "true")
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+
+	if !cfg.Channels.SMS.Enabled {
+		t.Fatal("sms.enabled = false, want true")
+	}
+	if cfg.Channels.SMS.GatewayURL != "http://127.0.0.1:8080" {
+		t.Fatalf("gateway_url = %q, want %q", cfg.Channels.SMS.GatewayURL, "http://127.0.0.1:8080")
+	}
+	if cfg.Channels.SMS.APIKey != "secret" {
+		t.Fatalf("api_key = %q, want %q", cfg.Channels.SMS.APIKey, "secret")
+	}
+	if cfg.Channels.SMS.PollInterval != 7 {
+		t.Fatalf("poll_interval = %d, want 7", cfg.Channels.SMS.PollInterval)
+	}
+	if cfg.Channels.SMS.TimeoutSeconds != 11 {
+		t.Fatalf("timeout_seconds = %d, want 11", cfg.Channels.SMS.TimeoutSeconds)
+	}
+	if !cfg.Channels.SMS.DeleteAfterRead {
+		t.Fatal("delete_after_read = false, want true")
+	}
+}
+
 func TestConfig_BackwardCompat_NoAgentsList(t *testing.T) {
 	jsonData := `{
 		"agents": {
