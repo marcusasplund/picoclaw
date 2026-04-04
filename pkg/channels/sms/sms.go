@@ -41,8 +41,9 @@ type SMSChannel struct {
 	httpClient *http.Client
 	ctx        context.Context
 	cancel     context.CancelFunc
-	peer       bus.Peer
 }
+
+var _ channels.Channel = (*SMSChannel)(nil)
 
 func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChannel, error) {
 	if cfg.GatewayURL == "" {
@@ -75,11 +76,10 @@ func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChanne
 	return ch, nil
 }
 
-func (c *SMSChannel) Start(ctx context.Context, peer bus.Peer) error {
+func (c *SMSChannel) Start(ctx context.Context) error {
 	logger.InfoC("sms", "Starting SMS channel")
 
 	c.ctx, c.cancel = context.WithCancel(ctx)
-	c.peer = peer
 	go c.pollLoop()
 
 	c.SetRunning(true)
@@ -99,14 +99,14 @@ func (c *SMSChannel) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (c *SMSChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
+func (c *SMSChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
 	if !c.IsRunning() {
-		return channels.ErrNotRunning
+		return nil, channels.ErrNotRunning
 	}
 
 	number := strings.TrimSpace(msg.ChatID)
 	if number == "" {
-		return fmt.Errorf("invalid sms chat ID: %s", msg.ChatID)
+		return nil, fmt.Errorf("invalid sms chat ID: %s", msg.ChatID)
 	}
 
 	payload := sendRequest{
@@ -119,14 +119,14 @@ func (c *SMSChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
 			"number": number,
 			"error":  err.Error(),
 		})
-		return fmt.Errorf("sms send: %w", channels.ErrTemporary)
+		return nil, fmt.Errorf("sms send: %w", channels.ErrTemporary)
 	}
 
 	logger.DebugCF("sms", "SMS sent", map[string]any{
 		"number": number,
 	})
 
-	return nil
+	return nil, nil
 }
 
 func (c *SMSChannel) pollLoop() {
@@ -242,7 +242,7 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 
 	c.HandleMessage(
 		c.ctx,
-		c.peer,
+		peer,
 		messageID,
 		number,
 		chatID,
