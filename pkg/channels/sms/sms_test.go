@@ -32,7 +32,7 @@ func TestSMSChannelSendPostsExpectedPayload(t *testing.T) {
 	ch, err := NewSMSChannel(bc, &config.SMSConfig{
 		GatewayURL: srv.URL,
 		APIKey:     "test-key",
-	}, bus.NewMessageBus(16))
+	}, bus.NewMessageBus())
 	if err != nil {
 		t.Fatalf("NewSMSChannel() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestSMSChannelSendRequiresChatID(t *testing.T) {
 	bc := &config.Channel{Type: config.ChannelSMS, Enabled: true}
 	ch, err := NewSMSChannel(bc, &config.SMSConfig{
 		GatewayURL: "http://example.test",
-	}, bus.NewMessageBus(16))
+	}, bus.NewMessageBus())
 	if err != nil {
 		t.Fatalf("NewSMSChannel() error = %v", err)
 	}

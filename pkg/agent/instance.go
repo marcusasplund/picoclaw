@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-    "github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/isolation"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -65,7 +65,7 @@ func NewAgentInstance(
 	defaults *config.AgentDefaults,
 	cfg *config.Config,
 	provider providers.LLMProvider,
-    messageBus *bus.MessageBus,
+	messageBus *bus.MessageBus,
 ) *AgentInstance {
 	if cfg != nil {
 		// Keep the subprocess isolation runtime aligned with the latest loaded config

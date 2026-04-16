@@ -133,54 +133,54 @@ func (c *SMSChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]strin
 }
 
 func (c *SMSChannel) pollLoop() {
-        interval := c.config.PollInterval
-        if interval <= 0 {
-                interval = 15
-        }
+	interval := c.config.PollInterval
+	if interval <= 0 {
+		interval = 15
+	}
 
-        logger.InfoCF("sms", "Starting poll loop", map[string]any{
-                "interval_seconds": interval,
-        })
+	logger.InfoCF("sms", "Starting poll loop", map[string]any{
+		"interval_seconds": interval,
+	})
 
-        ticker := time.NewTicker(time.Duration(interval) * time.Second)
-        defer ticker.Stop()
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
 
-        logger.DebugC("sms", "Running initial pollOnce")
-        c.pollOnce()
+	logger.DebugC("sms", "Running initial pollOnce")
+	c.pollOnce()
 
-        for {
-                select {
-                case <-c.ctx.Done():
-                        logger.InfoC("sms", "Stopping poll loop")
-                        return
-                case <-ticker.C:
-                        logger.DebugC("sms", "Ticker fired, running pollOnce")
-                        c.pollOnce()
-                }
-        }
+	for {
+		select {
+		case <-c.ctx.Done():
+			logger.InfoC("sms", "Stopping poll loop")
+			return
+		case <-ticker.C:
+			logger.DebugC("sms", "Ticker fired, running pollOnce")
+			c.pollOnce()
+		}
+	}
 }
 
 func (c *SMSChannel) pollOnce() {
-        logger.DebugC("sms", "pollOnce entered")
+	logger.DebugC("sms", "pollOnce entered")
 
-        ctx, cancel := context.WithTimeout(c.ctx, c.httpClient.Timeout)
-        defer cancel()
+	ctx, cancel := context.WithTimeout(c.ctx, c.httpClient.Timeout)
+	defer cancel()
 
-        var resp unreadResponse
-        if err := c.doJSON(ctx, http.MethodGet, "/sms/unread", nil, &resp); err != nil {
-                logger.ErrorCF("sms", "Failed to fetch unread SMS", map[string]any{
-                        "error": err.Error(),
-                })
-                return
-        }
+	var resp unreadResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/sms/unread", nil, &resp); err != nil {
+		logger.ErrorCF("sms", "Failed to fetch unread SMS", map[string]any{
+			"error": err.Error(),
+		})
+		return
+	}
 
-        logger.DebugCF("sms", "Fetched unread SMS", map[string]any{
-                "count": len(resp.Messages),
-        })
+	logger.DebugCF("sms", "Fetched unread SMS", map[string]any{
+		"count": len(resp.Messages),
+	})
 
-        for _, sms := range resp.Messages {
-                c.handleInboundSMS(sms)
-        }
+	for _, sms := range resp.Messages {
+		c.handleInboundSMS(sms)
+	}
 }
 
 func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
@@ -197,33 +197,29 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 	}
 
 	if !c.IsAllowedSender(sender) {
-	logger.DebugCF("sms", "Message rejected by allowlist", map[string]any{
-		"number": number,
-		"index":  sms.Index,
-	})
-
-	if c.config.DeleteAfterRead {
-		logger.DebugCF("sms", "Deleting rejected SMS", map[string]any{
-			"index": sms.Index,
+		logger.DebugCF("sms", "Message rejected by allowlist", map[string]any{
+			"number": number,
+			"index":  sms.Index,
 		})
 
-		if err := c.deleteSMS(c.ctx, sms.Index); err != nil {
-			logger.ErrorCF("sms", "Failed to delete rejected SMS", map[string]any{
-				"index": sms.Index,
-				"error": err.Error(),
-			})
-		} else {
-			logger.DebugCF("sms", "Deleted rejected SMS", map[string]any{
+		if c.config.DeleteAfterRead {
+			logger.DebugCF("sms", "Deleting rejected SMS", map[string]any{
 				"index": sms.Index,
 			})
-		}
-	}
 
-	return
-}
-	peer := bus.Peer{
-		Kind: "direct",
-		ID:   number,
+			if err := c.deleteSMS(c.ctx, sms.Index); err != nil {
+				logger.ErrorCF("sms", "Failed to delete rejected SMS", map[string]any{
+					"index": sms.Index,
+					"error": err.Error(),
+				})
+			} else {
+				logger.DebugCF("sms", "Deleted rejected SMS", map[string]any{
+					"index": sms.Index,
+				})
+			}
+		}
+
+		return
 	}
 
 	messageID := strconv.Itoa(sms.Index)
@@ -231,7 +227,7 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 
 	metadata := map[string]string{
 		"platform":  "sms",
-		"sms_index": strconv.Itoa(sms.Index),
+		"sms_index": messageID,
 		"number":    number,
 		"state":     sms.State,
 		"date":      sms.Date,
@@ -243,17 +239,15 @@ func (c *SMSChannel) handleInboundSMS(sms inboundSMS) {
 		"preview": truncateSMS(content, 80),
 	})
 
-	c.HandleMessage(
-		c.ctx,
-		peer,
-		messageID,
-		number,
-		chatID,
-		content,
-		nil,
-		metadata,
-		sender,
-	)
+	inboundCtx := bus.InboundContext{
+		Channel:   config.ChannelSMS,
+		ChatID:    chatID,
+		ChatType:  "direct",
+		SenderID:  sender.CanonicalID,
+		MessageID: messageID,
+		Raw:       metadata,
+	}
+	c.HandleInboundContext(c.ctx, chatID, content, nil, inboundCtx, sender)
 
 	if c.config.DeleteAfterRead {
 		if err := c.deleteSMS(c.ctx, sms.Index); err != nil {
