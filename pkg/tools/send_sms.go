@@ -21,10 +21,14 @@ type SendSMSTool struct {
 
 func NewSendSMSTool(messageBus *bus.MessageBus, cfg *config.Config) *SendSMSTool {
 	allowed := make(map[string]struct{})
-	for _, n := range cfg.Channels.SMS.AllowFrom {
-		n = normalizePhoneNumber(n)
-		if n != "" {
-			allowed[n] = struct{}{}
+	if cfg != nil {
+		if smsChannel := cfg.Channels.Get(config.ChannelSMS); smsChannel != nil {
+			for _, n := range smsChannel.AllowFrom {
+				n = normalizePhoneNumber(n)
+				if n != "" {
+					allowed[n] = struct{}{}
+				}
+			}
 		}
 	}
 

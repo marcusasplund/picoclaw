@@ -28,7 +28,8 @@ func TestSMSChannelSendPostsExpectedPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := NewSMSChannel(config.SMSConfig{
+	bc := &config.Channel{Type: config.ChannelSMS, Enabled: true}
+	ch, err := NewSMSChannel(bc, &config.SMSConfig{
 		GatewayURL: srv.URL,
 		APIKey:     "test-key",
 	}, bus.NewMessageBus(16))
@@ -67,7 +68,8 @@ func TestSMSChannelSendPostsExpectedPayload(t *testing.T) {
 }
 
 func TestSMSChannelSendRequiresChatID(t *testing.T) {
-	ch, err := NewSMSChannel(config.SMSConfig{
+	bc := &config.Channel{Type: config.ChannelSMS, Enabled: true}
+	ch, err := NewSMSChannel(bc, &config.SMSConfig{
 		GatewayURL: "http://example.test",
 	}, bus.NewMessageBus(16))
 	if err != nil {

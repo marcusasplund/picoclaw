@@ -29,6 +29,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -60,37 +61,47 @@ type AgentLoop struct {
 	pendingSkills  sync.Map
 	mu             sync.RWMutex
 
-	// Concurrent turn management (from HEAD)
-	activeTurnStates sync.Map     // key: sessionKey (string), value: *turnState
-	subTurnCounter   atomic.Int64 // Counter for generating unique SubTurn IDs
+	// workerSem limits concurrent turn processing workers.
+	workerSem chan struct{}
 
-	// Turn tracking (from Incoming)
+	// activeTurnStates tracks active turns per session to prevent duplicates.
+	activeTurnStates sync.Map
+	subTurnCounter   atomic.Int64
+
 	turnSeq        atomic.Uint64
 	activeRequests sync.WaitGroup
 
 	reloadFunc func() error
+
+	providerFactory func(*config.ModelConfig) (providers.LLMProvider, string, error)
 }
 
 // processOptions configures how a message is processed
 type processOptions struct {
-	SessionKey              string              // Session identifier for history/context
-	Channel                 string              // Target channel for tool execution
-	ChatID                  string              // Target chat ID for tool execution
-	MessageID               string              // Current inbound platform message ID
-	ReplyToMessageID        string              // Current inbound reply target message ID
-	SenderID                string              // Current sender ID for dynamic context
-	SenderDisplayName       string              // Current sender display name for dynamic context
-	UserMessage             string              // User message content (may include prefix)
-	ForcedSkills            []string            // Skills explicitly requested for this message
-	SystemPromptOverride    string              // Override the default system prompt (Used by SubTurns)
-	Media                   []string            // media:// refs from inbound message
-	InitialSteeringMessages []providers.Message // Steering messages from refactor/agent
-	DefaultResponse         string              // Response when LLM returns empty
-	EnableSummary           bool                // Whether to trigger summarization
-	SendResponse            bool                // Whether to send response via bus
-	SuppressToolFeedback    bool                // Whether to suppress inline tool feedback messages
-	NoHistory               bool                // If true, don't load session history (for heartbeat)
-	SkipInitialSteeringPoll bool                // If true, skip the steering poll at loop start (used by Continue)
+	Dispatch                DispatchRequest        // Normalized routed request boundary for this turn
+	SessionKey              string                 // Session identifier for history/context
+	SessionAliases          []string               // Compatibility aliases for the session key
+	Channel                 string                 // Target channel for tool execution
+	ChatID                  string                 // Target chat ID for tool execution
+	MessageID               string                 // Current inbound platform message ID
+	ReplyToMessageID        string                 // Current inbound reply target message ID
+	SenderID                string                 // Current sender ID for dynamic context
+	SenderDisplayName       string                 // Current sender display name for dynamic context
+	UserMessage             string                 // User message content (may include prefix)
+	ForcedSkills            []string               // Skills explicitly requested for this message
+	SystemPromptOverride    string                 // Override the default system prompt (Used by SubTurns)
+	Media                   []string               // media:// refs from inbound message
+	InitialSteeringMessages []providers.Message    // Steering messages from refactor/agent
+	DefaultResponse         string                 // Response when LLM returns empty
+	EnableSummary           bool                   // Whether to trigger summarization
+	SendResponse            bool                   // Whether to send response via bus
+	AllowInterimPicoPublish bool                   // Whether pico tool-call interim text can be published when SendResponse is false
+	SuppressToolFeedback    bool                   // Whether to suppress inline tool feedback messages
+	NoHistory               bool                   // If true, don't load session history (for heartbeat)
+	SkipInitialSteeringPoll bool                   // If true, skip the steering poll at loop start (used by Continue)
+	InboundContext          *bus.InboundContext    // Normalized inbound facts for events/hooks
+	RouteResult             *routing.ResolvedRoute // Route decision snapshot for events/hooks
+	SessionScope            *session.SessionScope  // Session scope snapshot for events/hooks
 }
 
 type continuationTarget struct {
@@ -104,6 +115,9 @@ const (
 	toolLimitResponse          = "I've reached `max_tool_iterations` without a final response. Increase `max_tool_iterations` in config.json if this task needs more tool steps."
 	handledToolResponseSummary = "Requested output delivered via tool attachment."
 	sessionKeyAgentPrefix      = "agent:"
+	pendingTurnPrefix          = "pending-"
+	metadataKeyMessageKind     = "message_kind"
+	messageKindThought         = "thought"
 	metadataKeyAccountID       = "account_id"
 	metadataKeyGuildID         = "guild_id"
 	metadataKeyTeamID          = "team_id"
@@ -140,6 +154,13 @@ func NewAgentLoop(
 	}
 
 	eventBus := NewEventBus()
+
+	// Determine worker pool size from config (default: 1 = sequential)
+	workerPoolSize := cfg.Agents.Defaults.MaxParallelTurns
+	if workerPoolSize <= 0 {
+		workerPoolSize = 1
+	}
+
 	al := &AgentLoop{
 		bus:         msgBus,
 		cfg:         cfg,
@@ -149,7 +170,9 @@ func NewAgentLoop(
 		fallback:    fallbackChain,
 		cmdRegistry: commands.NewRegistry(commands.BuiltinDefinitions()),
 		steering:    newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		workerSem:   make(chan struct{}, workerPoolSize),
 	}
+	al.providerFactory = providers.CreateProviderFromConfig
 	al.hooks = NewHookManager(eventBus)
 	configureHookManagerFromConfig(al.hooks, cfg)
 	al.contextManager = al.resolveContextManager()
@@ -242,12 +265,23 @@ func registerSharedTools(
 		// Message tool
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()
-			messageTool.SetSendCallback(func(channel, chatID, content, replyToMessageID string) error {
+			messageTool.SetSendCallback(func(
+				ctx context.Context,
+				channel, chatID, content, replyToMessageID string,
+			) error {
 				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer pubCancel()
+				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
+				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
+					tools.ToolAgentID(ctx),
+					tools.ToolSessionKey(ctx),
+					tools.ToolSessionScope(ctx),
+				)
 				return msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-					Channel:          channel,
-					ChatID:           chatID,
+					Context:          outboundCtx,
+					AgentID:          outboundAgentID,
+					SessionKey:       outboundSessionKey,
+					Scope:            outboundScope,
 					Content:          content,
 					ReplyToMessageID: replyToMessageID,
 				})
@@ -306,21 +340,7 @@ func registerSharedTools(
 		find_skills_enable := cfg.Tools.IsToolEnabled("find_skills")
 		install_skills_enable := cfg.Tools.IsToolEnabled("install_skill")
 		if skills_enabled && (find_skills_enable || install_skills_enable) {
-			clawHubConfig := cfg.Tools.Skills.Registries.ClawHub
-			registryMgr := skills.NewRegistryManagerFromConfig(skills.RegistryConfig{
-				MaxConcurrentSearches: cfg.Tools.Skills.MaxConcurrentSearches,
-				ClawHub: skills.ClawHubConfig{
-					Enabled:         clawHubConfig.Enabled,
-					BaseURL:         clawHubConfig.BaseURL,
-					AuthToken:       clawHubConfig.AuthToken.String(),
-					SearchPath:      clawHubConfig.SearchPath,
-					SkillsPath:      clawHubConfig.SkillsPath,
-					DownloadPath:    clawHubConfig.DownloadPath,
-					Timeout:         clawHubConfig.Timeout,
-					MaxZipSize:      clawHubConfig.MaxZipSize,
-					MaxResponseSize: clawHubConfig.MaxResponseSize,
-				},
-			})
+			registryMgr := skills.NewRegistryManagerFromToolsConfig(cfg.Tools.Skills)
 
 			if find_skills_enable {
 				searchCache := skills.NewSearchCache(
@@ -466,233 +486,240 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// Start a goroutine that drains the bus while processMessage is
-			// running. Only messages that resolve to the active turn scope are
-			// redirected into steering; other inbound messages are requeued.
-			drainCancel := func() {}
-			if activeScope, activeAgentID, ok := al.resolveSteeringTarget(msg); ok {
-				drainCtx, cancel := context.WithCancel(ctx)
-				drainCancel = cancel
-				go al.drainBusToSteering(drainCtx, activeScope, activeAgentID)
+			// Resolve the session key for this message
+			sessionKey, agentID, ok := al.resolveSteeringTarget(msg)
+			if !ok {
+				// Non-routable message (e.g., system) — process immediately.
+				// Note: system messages are processed in the main goroutine,
+				// so they block the receive loop but guarantee session serialization.
+				al.processMessageSync(ctx, msg)
+				continue
 			}
 
-			// Process message
-			func() {
+			// Atomically claim the session key with a unique placeholder sentinel
+			// to prevent a TOCTOU race where multiple messages for the same session
+			// pass the Load check before either registers.
+			// The placeholder ensures GetActiveTurnBySession() never returns nil
+			// during turn setup. Each placeholder has a unique turnID to prevent
+			// cross-worker cleanup issues.
+			placeholder := &turnState{
+				turnID: makePendingTurnID(sessionKey, al.turnSeq.Add(1)),
+				phase:  TurnPhaseSetup,
+			}
+			if _, loaded := al.activeTurnStates.LoadOrStore(sessionKey, placeholder); loaded {
+				// Another turn is already active (or reserved) for this session — enqueue
+				if err := al.enqueueSteeringMessage(sessionKey, agentID, providers.Message{
+					Role:    "user",
+					Content: msg.Content,
+					Media:   append([]string(nil), msg.Media...),
+				}); err != nil {
+					logger.WarnCF("agent", "Failed to enqueue steering message",
+						map[string]any{
+							"error":       err.Error(),
+							"channel":     msg.Channel,
+							"chat_id":     msg.ChatID,
+							"session_key": sessionKey,
+						})
+				}
+				continue
+			}
+
+			// Session claimed — spawn a worker goroutine that acquires a semaphore
+			// slot. The goroutine is spawned immediately so the main loop keeps
+			// draining the inbound channel. The goroutine blocks on the semaphore.
+			go func(m bus.InboundMessage) {
+				// Acquire semaphore slot (blocks if at capacity)
+				select {
+				case al.workerSem <- struct{}{}:
+					// Got slot, start worker
+				case <-ctx.Done():
+					// Context canceled while waiting for a slot — clean up the
+					// placeholder to prevent session-level deadlock.
+					al.activeTurnStates.Delete(sessionKey)
+					return
+				}
+
+				// Safety-net cleanup: if the placeholder was never replaced by a real
+				// turnState (e.g., error before runTurn), delete it here. When runTurn
+				// completes normally, clearActiveTurn deletes the real turnState and
+				// this becomes a no-op (the key is already gone).
 				defer func() {
-					if al.channelManager != nil {
-						al.channelManager.InvokeTypingStop(msg.Channel, msg.ChatID)
+					if actual, ok := al.activeTurnStates.Load(sessionKey); ok {
+						if ts, ok := actual.(*turnState); ok && strings.HasPrefix(ts.turnID, pendingTurnPrefix) {
+							// Placeholder still present — runTurn never replaced it.
+							al.activeTurnStates.Delete(sessionKey)
+						}
 					}
 				}()
-				// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
-				// Currently disabled because files are deleted before the LLM can access their content.
-				// defer func() {
-				// 	if al.mediaStore != nil && msg.MediaScope != "" {
-				// 		if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
-				// 			logger.WarnCF("agent", "Failed to release media", map[string]any{
-				// 				"scope": msg.MediaScope,
-				// 				"error": releaseErr.Error(),
-				// 			})
-				// 		}
-				// 	}
-				// }()
 
-				drainCanceled := false
-				cancelDrain := func() {
-					if drainCanceled {
-						return
-					}
-					drainCancel()
-					drainCanceled = true
-				}
-				defer cancelDrain()
-
-				response, err := al.processMessage(ctx, msg)
-				if err != nil {
-					response = fmt.Sprintf("Error processing message: %v", err)
-				}
-				finalResponse := response
-
-				target, targetErr := al.buildContinuationTarget(msg)
-				if targetErr != nil {
-					logger.WarnCF("agent", "Failed to build steering continuation target",
-						map[string]any{
-							"channel": msg.Channel,
-							"error":   targetErr.Error(),
-						})
-					return
-				}
-				if target == nil {
-					cancelDrain()
-					if finalResponse != "" {
-						al.PublishResponseIfNeeded(ctx, msg.Channel, msg.ChatID, finalResponse)
-					}
-					return
-				}
-
-				for al.pendingSteeringCountForScope(target.SessionKey) > 0 {
-					logger.InfoCF("agent", "Continuing queued steering after turn end",
-						map[string]any{
-							"channel":     target.Channel,
-							"chat_id":     target.ChatID,
-							"session_key": target.SessionKey,
-							"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
-						})
-
-					continued, continueErr := al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
-					if continueErr != nil {
-						logger.WarnCF("agent", "Failed to continue queued steering",
+				defer func() {
+					if r := recover(); r != nil {
+						logger.RecoverPanicNoExit(r)
+						logger.ErrorCF("agent", "Worker goroutine panicked",
 							map[string]any{
-								"channel": target.Channel,
-								"chat_id": target.ChatID,
-								"error":   continueErr.Error(),
+								"session_key": sessionKey,
+								"channel":     m.Channel,
+								"chat_id":     m.ChatID,
+								"panic":       fmt.Sprintf("%v", r),
 							})
-						return
 					}
-					if continued == "" {
-						return
-					}
+				}()
+				defer func() { <-al.workerSem }() // Release slot
 
-					finalResponse = continued
+				if al.channelManager != nil {
+					defer al.channelManager.InvokeTypingStop(m.Channel, m.ChatID)
 				}
 
-				cancelDrain()
+				al.runTurnWithSteering(ctx, m)
+			}(msg)
 
-				for al.pendingSteeringCountForScope(target.SessionKey) > 0 {
-					logger.InfoCF("agent", "Draining steering queued during turn shutdown",
-						map[string]any{
-							"channel":     target.Channel,
-							"chat_id":     target.ChatID,
-							"session_key": target.SessionKey,
-							"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
-						})
-
-					continued, continueErr := al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
-					if continueErr != nil {
-						logger.WarnCF("agent", "Failed to continue queued steering after shutdown drain",
-							map[string]any{
-								"channel": target.Channel,
-								"chat_id": target.ChatID,
-								"error":   continueErr.Error(),
-							})
-						return
-					}
-					if continued == "" {
-						break
-					}
-
-					finalResponse = continued
-				}
-
-				if finalResponse != "" {
-					al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, finalResponse)
-				}
-			}()
+			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
+			// Currently disabled because files are deleted before the LLM can access their content.
+			// defer func() {
+			// 	if al.mediaStore != nil && msg.MediaScope != "" {
+			// 		if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
+			// 			logger.WarnCF("agent", "Failed to release media", map[string]any{
+			// 				"scope": msg.MediaScope,
+			// 				"error": releaseErr.Error(),
+			// 			})
+			// 		}
+			// 	}
+			// }()
 		}
 	}
 }
 
-// drainBusToSteering consumes inbound messages and redirects messages from the
-// active scope into the steering queue. Messages from other scopes are requeued
-// so they can be processed normally after the active turn. It drains all
-// immediately available messages, blocking for the first one until ctx is done.
-func (al *AgentLoop) drainBusToSteering(ctx context.Context, activeScope, activeAgentID string) {
-	blocking := true
-	for {
-		var msg bus.InboundMessage
+// processMessageSync processes a message synchronously (for non-routable/system messages).
+func (al *AgentLoop) processMessageSync(ctx context.Context, msg bus.InboundMessage) {
+	if al.channelManager != nil {
+		defer al.channelManager.InvokeTypingStop(msg.Channel, msg.ChatID)
+	}
 
-		if blocking {
-			// Block waiting for the first available message or ctx cancellation.
-			select {
-			case <-ctx.Done():
-				return
-			case m, ok := <-al.bus.InboundChan():
-				if !ok {
-					return
-				}
-				msg = m
-			}
-		} else {
-			// Non-blocking: drain any remaining queued messages, return when empty.
-			select {
-			case m, ok := <-al.bus.InboundChan():
-				if !ok {
-					return
-				}
-				msg = m
-			default:
-				return
-			}
+	response, err := al.processMessage(ctx, msg)
+	al.publishResponseOrError(ctx, msg.Channel, msg.ChatID, msg.SessionKey, response, err)
+}
+
+// runTurnWithSteering runs a complete turn for a message and drains its steering queue.
+func (al *AgentLoop) runTurnWithSteering(ctx context.Context, initialMsg bus.InboundMessage) {
+	// Process the initial message
+	response, err := al.processMessage(ctx, initialMsg)
+	if err != nil {
+		if !al.maybePublishError(ctx, initialMsg.Channel, initialMsg.ChatID, initialMsg.SessionKey, err) {
+			return // context canceled
 		}
-		blocking = false
+		response = ""
+	}
+	finalResponse := response
 
-		msgScope, _, scopeOK := al.resolveSteeringTarget(msg)
-		if !scopeOK || msgScope != activeScope {
-			if err := al.requeueInboundMessage(msg); err != nil {
-				logger.WarnCF("agent", "Failed to requeue non-steering inbound message", map[string]any{
-					"error":     err.Error(),
-					"channel":   msg.Channel,
-					"sender_id": msg.SenderID,
-				})
-			}
-			continue
-		}
-
-		// Transcribe audio if needed before steering, so the agent sees text.
-		msg, _ = al.transcribeAudioInMessage(ctx, msg)
-
-		logger.InfoCF("agent", "Redirecting inbound message to steering queue",
+	// Build continuation target
+	target, targetErr := al.buildContinuationTarget(initialMsg)
+	if targetErr != nil {
+		logger.WarnCF("agent", "Failed to build steering continuation target",
 			map[string]any{
-				"channel":     msg.Channel,
-				"sender_id":   msg.SenderID,
-				"content_len": len(msg.Content),
-				"scope":       activeScope,
+				"channel": initialMsg.Channel,
+				"error":   targetErr.Error(),
+			})
+		return
+	}
+	if target == nil {
+		// System message or non-routable, response already published
+		return
+	}
+
+	// Drain steering queue using existing Continue mechanism
+	for al.pendingSteeringCountForScope(target.SessionKey) > 0 {
+		// Check for context cancellation between iterations
+		if ctx.Err() != nil {
+			return
+		}
+
+		logger.InfoCF("agent", "Continuing queued steering after turn end",
+			map[string]any{
+				"channel":     target.Channel,
+				"chat_id":     target.ChatID,
+				"session_key": target.SessionKey,
+				"queue_depth": al.pendingSteeringCountForScope(target.SessionKey),
 			})
 
-		if err := al.enqueueSteeringMessage(activeScope, activeAgentID, providers.Message{
-			Role:    "user",
-			Content: msg.Content,
-			Media:   append([]string(nil), msg.Media...),
-		}); err != nil {
-			logger.WarnCF("agent", "Failed to steer message, will be lost",
+		continued, continueErr := al.Continue(ctx, target.SessionKey, target.Channel, target.ChatID)
+		if continueErr != nil {
+			logger.WarnCF("agent", "Failed to continue queued steering",
 				map[string]any{
-					"error":   err.Error(),
-					"channel": msg.Channel,
+					"channel": target.Channel,
+					"chat_id": target.ChatID,
+					"error":   continueErr.Error(),
 				})
+			break
 		}
+		if continued == "" {
+			break
+		}
+		finalResponse = continued
 	}
+
+	// Publish final response
+	if finalResponse != "" {
+		al.PublishResponseIfNeeded(ctx, target.Channel, target.ChatID, target.SessionKey, finalResponse)
+	}
+}
+
+// maybePublishError publishes an error response unless the error is context.Canceled.
+// Returns true if processing should continue (non-cancellation error or no error),
+// false if context was canceled and the caller should return.
+func (al *AgentLoop) maybePublishError(ctx context.Context, channel, chatID, sessionKey string, err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, fmt.Sprintf("Error processing message: %v", err))
+	return true
+}
+
+// publishResponseOrError publishes the response, or an error message if processing failed.
+func (al *AgentLoop) publishResponseOrError(
+	ctx context.Context,
+	channel, chatID, sessionKey string,
+	response string,
+	err error,
+) {
+	if err != nil {
+		if !al.maybePublishError(ctx, channel, chatID, sessionKey, err) {
+			return
+		}
+		response = ""
+	}
+	al.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
 }
 
 func (al *AgentLoop) Stop() {
 	al.running.Store(false)
 }
 
-func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatID, response string) {
+func (al *AgentLoop) PublishResponseIfNeeded(ctx context.Context, channel, chatID, sessionKey, response string) {
 	if response == "" {
 		return
 	}
 
-	alreadySent := false
+	alreadySentToSameChat := false
 	defaultAgent := al.GetRegistry().GetDefaultAgent()
 	if defaultAgent != nil {
 		if tool, ok := defaultAgent.Tools.Get("message"); ok {
 			if mt, ok := tool.(*tools.MessageTool); ok {
-				alreadySent = mt.HasSentInRound()
+				alreadySentToSameChat = mt.HasSentTo(sessionKey, channel, chatID)
 			}
 		}
 	}
 
-	if alreadySent {
+	if alreadySentToSameChat {
 		logger.DebugCF(
 			"agent",
-			"Skipped outbound (message tool already sent)",
-			map[string]any{"channel": channel},
+			"Skipped outbound (message tool already sent to same chat)",
+			map[string]any{"channel": channel, "chat_id": chatID},
 		)
 		return
 	}
 
 	al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-		Channel: channel,
-		ChatID:  chatID,
+		Context: bus.NewOutboundContext(channel, chatID, ""),
 		Content: response,
 	})
 	logger.InfoCF("agent", "Published outbound response",
@@ -712,9 +739,10 @@ func (al *AgentLoop) buildContinuationTarget(msg bus.InboundMessage) (*continuat
 	if err != nil {
 		return nil, err
 	}
+	allocation := al.allocateRouteSession(route, msg)
 
 	return &continuationTarget{
-		SessionKey: resolveScopeKey(route, msg.SessionKey),
+		SessionKey: resolveScopeKey(allocation.SessionKey, msg.SessionKey),
 		Channel:    msg.Channel,
 		ChatID:     msg.ChatID,
 	}, nil
@@ -739,6 +767,74 @@ func (al *AgentLoop) Close() {
 	}
 	if al.eventBus != nil {
 		al.eventBus.Close()
+	}
+}
+
+func outboundContextFromInbound(
+	inbound *bus.InboundContext,
+	channel, chatID, replyToMessageID string,
+) bus.InboundContext {
+	if inbound == nil {
+		return bus.NewOutboundContext(channel, chatID, replyToMessageID)
+	}
+
+	outboundCtx := *cloneInboundContext(inbound)
+	if outboundCtx.Channel == "" {
+		outboundCtx.Channel = channel
+	}
+	if outboundCtx.ChatID == "" {
+		outboundCtx.ChatID = chatID
+	}
+	if outboundCtx.ReplyToMessageID == "" {
+		outboundCtx.ReplyToMessageID = replyToMessageID
+	}
+	return outboundCtx
+}
+
+func outboundScopeFromSessionScope(scope *session.SessionScope) *bus.OutboundScope {
+	if scope == nil {
+		return nil
+	}
+	outboundScope := &bus.OutboundScope{
+		Version: scope.Version,
+		AgentID: scope.AgentID,
+		Channel: scope.Channel,
+		Account: scope.Account,
+	}
+	if len(scope.Dimensions) > 0 {
+		outboundScope.Dimensions = append([]string(nil), scope.Dimensions...)
+	}
+	if len(scope.Values) > 0 {
+		outboundScope.Values = make(map[string]string, len(scope.Values))
+		for key, value := range scope.Values {
+			outboundScope.Values[key] = value
+		}
+	}
+	return outboundScope
+}
+
+func outboundTurnMetadata(
+	agentID, sessionKey string,
+	scope *session.SessionScope,
+) (string, string, *bus.OutboundScope) {
+	return agentID, sessionKey, outboundScopeFromSessionScope(scope)
+}
+
+func outboundMessageForTurn(ts *turnState, content string) bus.OutboundMessage {
+	agentID, sessionKey, scope := outboundTurnMetadata(ts.agent.ID, ts.sessionKey, ts.opts.Dispatch.SessionScope)
+	return bus.OutboundMessage{
+		Channel: ts.channel,
+		ChatID:  ts.chatID,
+		Context: outboundContextFromInbound(
+			ts.opts.Dispatch.InboundContext,
+			ts.channel,
+			ts.chatID,
+			ts.opts.Dispatch.ReplyToMessageID(),
+		),
+		AgentID:    agentID,
+		SessionKey: sessionKey,
+		Scope:      scope,
+		Content:    content,
 	}
 }
 
@@ -788,32 +884,37 @@ type turnEventScope struct {
 	agentID    string
 	sessionKey string
 	turnID     string
+	context    *TurnContext
 }
 
-func (al *AgentLoop) newTurnEventScope(agentID, sessionKey string) turnEventScope {
+func (al *AgentLoop) newTurnEventScope(agentID, sessionKey string, turnCtx *TurnContext) turnEventScope {
 	seq := al.turnSeq.Add(1)
 	return turnEventScope{
 		agentID:    agentID,
 		sessionKey: sessionKey,
 		turnID:     fmt.Sprintf("%s-turn-%d", agentID, seq),
+		context:    cloneTurnContext(turnCtx),
 	}
 }
 
 func (ts turnEventScope) meta(iteration int, source, tracePath string) EventMeta {
 	return EventMeta{
-		AgentID:    ts.agentID,
-		TurnID:     ts.turnID,
-		SessionKey: ts.sessionKey,
-		Iteration:  iteration,
-		Source:     source,
-		TracePath:  tracePath,
+		AgentID:     ts.agentID,
+		TurnID:      ts.turnID,
+		SessionKey:  ts.sessionKey,
+		Iteration:   iteration,
+		Source:      source,
+		TracePath:   tracePath,
+		turnContext: cloneTurnContext(ts.context),
 	}
 }
 
 func (al *AgentLoop) emitEvent(kind EventKind, meta EventMeta, payload any) {
+	clonedMeta := cloneEventMeta(meta)
 	evt := Event{
 		Kind:    kind,
-		Meta:    meta,
+		Meta:    clonedMeta,
+		Context: cloneTurnContext(clonedMeta.turnContext),
 		Payload: payload,
 	}
 
@@ -879,10 +980,10 @@ func (al *AgentLoop) logEvent(evt Event) {
 		fields["source"] = evt.Meta.Source
 	}
 
+	appendEventContextFields(fields, evt.Context)
+
 	switch payload := evt.Payload.(type) {
 	case TurnStartPayload:
-		fields["channel"] = payload.Channel
-		fields["chat_id"] = payload.ChatID
 		fields["user_len"] = len(payload.UserMessage)
 		fields["media_count"] = payload.MediaCount
 	case TurnEndPayload:
@@ -935,8 +1036,6 @@ func (al *AgentLoop) logEvent(evt Event) {
 		fields["total_content_len"] = payload.TotalContentLen
 	case FollowUpQueuedPayload:
 		fields["source_tool"] = payload.SourceTool
-		fields["channel"] = payload.Channel
-		fields["chat_id"] = payload.ChatID
 		fields["content_len"] = payload.ContentLen
 	case InterruptReceivedPayload:
 		fields["interrupt_kind"] = payload.Kind
@@ -960,6 +1059,87 @@ func (al *AgentLoop) logEvent(evt Event) {
 	}
 
 	logger.InfoCF("eventbus", fmt.Sprintf("Agent event: %s", evt.Kind.String()), fields)
+}
+
+func appendEventContextFields(fields map[string]any, turnCtx *TurnContext) {
+	if turnCtx == nil {
+		return
+	}
+
+	if inbound := turnCtx.Inbound; inbound != nil {
+		if inbound.Channel != "" {
+			fields["inbound_channel"] = inbound.Channel
+		}
+		if inbound.Account != "" {
+			fields["inbound_account"] = inbound.Account
+		}
+		if inbound.ChatID != "" {
+			fields["inbound_chat_id"] = inbound.ChatID
+		}
+		if inbound.ChatType != "" {
+			fields["inbound_chat_type"] = inbound.ChatType
+		}
+		if inbound.TopicID != "" {
+			fields["inbound_topic_id"] = inbound.TopicID
+		}
+		if inbound.SpaceType != "" {
+			fields["inbound_space_type"] = inbound.SpaceType
+		}
+		if inbound.SpaceID != "" {
+			fields["inbound_space_id"] = inbound.SpaceID
+		}
+		if inbound.SenderID != "" {
+			fields["inbound_sender_id"] = inbound.SenderID
+		}
+		if inbound.Mentioned {
+			fields["inbound_mentioned"] = true
+		}
+	}
+
+	if route := turnCtx.Route; route != nil {
+		if route.AgentID != "" {
+			fields["route_agent_id"] = route.AgentID
+		}
+		if route.Channel != "" {
+			fields["route_channel"] = route.Channel
+		}
+		if route.AccountID != "" {
+			fields["route_account_id"] = route.AccountID
+		}
+		if route.MatchedBy != "" {
+			fields["route_matched_by"] = route.MatchedBy
+		}
+		if len(route.SessionPolicy.Dimensions) > 0 {
+			fields["route_dimensions"] = strings.Join(route.SessionPolicy.Dimensions, ",")
+		}
+		if count := len(route.SessionPolicy.IdentityLinks); count > 0 {
+			fields["route_identity_link_count"] = count
+		}
+	}
+
+	if scope := turnCtx.Scope; scope != nil {
+		if scope.Version > 0 {
+			fields["scope_version"] = scope.Version
+		}
+		if scope.AgentID != "" {
+			fields["scope_agent_id"] = scope.AgentID
+		}
+		if scope.Channel != "" {
+			fields["scope_channel"] = scope.Channel
+		}
+		if scope.Account != "" {
+			fields["scope_account"] = scope.Account
+		}
+		if len(scope.Dimensions) > 0 {
+			fields["scope_dimensions"] = strings.Join(scope.Dimensions, ",")
+		}
+		for dim, value := range scope.Values {
+			if dim == "" || value == "" {
+				continue
+			}
+			fields["scope_"+dim] = value
+		}
+	}
 }
 
 func (al *AgentLoop) RegisterTool(tool tools.Tool) {
@@ -1054,8 +1234,23 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 
 	al.mu.Unlock()
 
+	oldMCPManager := al.mcp.reset()
 	al.hookRuntime.reset(al)
 	configureHookManagerFromConfig(al.hooks, cfg)
+	if err := al.ensureHooksInitialized(ctx); err != nil {
+		logger.WarnCF("agent", "Configured hooks failed to reinitialize after reload",
+			map[string]any{"error": err.Error()})
+	}
+	if oldMCPManager != nil {
+		if err := oldMCPManager.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous MCP manager during reload",
+				map[string]any{"error": err.Error()})
+		}
+	}
+	if err := al.ensureMCPInitialized(ctx); err != nil {
+		logger.WarnCF("agent", "MCP failed to reinitialize after reload",
+			map[string]any{"error": err.Error()})
+	}
 
 	// Close old provider after releasing the lock
 	// This prevents blocking readers while closing
@@ -1222,8 +1417,7 @@ func (al *AgentLoop) sendTranscriptionFeedback(
 	}
 
 	err := al.channelManager.SendMessage(ctx, bus.OutboundMessage{
-		Channel:          channel,
-		ChatID:           chatID,
+		Context:          bus.NewOutboundContext(channel, chatID, messageID),
 		Content:          feedbackMsg,
 		ReplyToMessageID: messageID,
 	})
@@ -1299,9 +1493,12 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	}
 
 	msg := bus.InboundMessage{
-		Channel:    channel,
-		SenderID:   "cron",
-		ChatID:     chatID,
+		Context: bus.InboundContext{
+			Channel:  channel,
+			ChatID:   chatID,
+			ChatType: "direct",
+			SenderID: "cron",
+		},
 		Content:    content,
 		SessionKey: sessionKey,
 	}
@@ -1326,11 +1523,20 @@ func (al *AgentLoop) ProcessHeartbeat(
 	if agent == nil {
 		return "", fmt.Errorf("no default agent for heartbeat")
 	}
+	dispatch := DispatchRequest{
+		SessionKey:  "heartbeat",
+		UserMessage: content,
+	}
+	if channel != "" || chatID != "" {
+		dispatch.InboundContext = &bus.InboundContext{
+			Channel:  channel,
+			ChatID:   chatID,
+			ChatType: "direct",
+			SenderID: "heartbeat",
+		}
+	}
 	return al.runAgentLoop(ctx, agent, processOptions{
-		SessionKey:           "heartbeat",
-		Channel:              channel,
-		ChatID:               chatID,
-		UserMessage:          content,
+		Dispatch:             dispatch,
 		DefaultResponse:      defaultResponse,
 		EnableSummary:        false,
 		SendResponse:         false,
@@ -1340,6 +1546,8 @@ func (al *AgentLoop) ProcessHeartbeat(
 }
 
 func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	msg = bus.NormalizeInboundMessage(msg)
+
 	// Add message preview to log (show full content for error messages)
 	var logContent string
 	if strings.Contains(msg.Content, "Error:") || strings.Contains(msg.Content, "error") {
@@ -1377,40 +1585,47 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return "", routeErr
 	}
 
+	allocation := al.allocateRouteSession(route, msg)
+
+	// Resolve session key from the route allocation, while preserving explicit
+	// agent-scoped keys supplied by the caller.
+	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
+	sessionKey := scopeKey
+
 	// Reset message-tool state for this round so we don't skip publishing due to a previous round.
 	if tool, ok := agent.Tools.Get("message"); ok {
-		if resetter, ok := tool.(interface{ ResetSentInRound() }); ok {
-			resetter.ResetSentInRound()
+		if resetter, ok := tool.(interface{ ResetSentInRound(sessionKey string) }); ok {
+			resetter.ResetSentInRound(sessionKey)
 		}
 	}
 
-	// Resolve session key from route, while preserving explicit agent-scoped keys.
-	scopeKey := resolveScopeKey(route, msg.SessionKey)
-	sessionKey := scopeKey
-
 	logger.InfoCF("agent", "Routed message",
 		map[string]any{
-			"agent_id":      agent.ID,
-			"scope_key":     scopeKey,
-			"session_key":   sessionKey,
-			"matched_by":    route.MatchedBy,
-			"route_agent":   route.AgentID,
-			"route_channel": route.Channel,
+			"agent_id":           agent.ID,
+			"scope_key":          scopeKey,
+			"session_key":        sessionKey,
+			"matched_by":         route.MatchedBy,
+			"route_agent":        route.AgentID,
+			"route_channel":      route.Channel,
+			"route_main_session": allocation.MainSessionKey,
 		})
 
 	opts := processOptions{
-		SessionKey:        sessionKey,
-		Channel:           msg.Channel,
-		ChatID:            msg.ChatID,
-		MessageID:         msg.MessageID,
-		ReplyToMessageID:  inboundMetadata(msg, metadataKeyReplyToMessage),
-		SenderID:          msg.SenderID,
-		SenderDisplayName: msg.Sender.DisplayName,
-		UserMessage:       msg.Content,
-		Media:             msg.Media,
-		DefaultResponse:   defaultResponse,
-		EnableSummary:     true,
-		SendResponse:      false,
+		Dispatch: DispatchRequest{
+			SessionKey:     sessionKey,
+			SessionAliases: buildSessionAliases(sessionKey, append(allocation.SessionAliases, msg.SessionKey)...),
+			InboundContext: cloneInboundContext(&msg.Context),
+			RouteResult:    cloneResolvedRoute(&route),
+			SessionScope:   session.CloneScope(&allocation.Scope),
+			UserMessage:    msg.Content,
+			Media:          append([]string(nil), msg.Media...),
+		},
+		SenderID:                msg.SenderID,
+		SenderDisplayName:       msg.Sender.DisplayName,
+		DefaultResponse:         defaultResponse,
+		EnableSummary:           true,
+		SendResponse:            false,
+		AllowInterimPicoPublish: true,
 	}
 
 	// context-dependent commands check their own Runtime fields and report
@@ -1419,11 +1634,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return response, nil
 	}
 
-	if pending := al.takePendingSkills(opts.SessionKey); len(pending) > 0 {
+	if pending := al.takePendingSkills(opts.Dispatch.SessionKey); len(pending) > 0 {
 		opts.ForcedSkills = append(opts.ForcedSkills, pending...)
 		logger.InfoCF("agent", "Applying pending skill override",
 			map[string]any{
-				"session_key": opts.SessionKey,
+				"session_key": opts.Dispatch.SessionKey,
 				"skills":      strings.Join(pending, ","),
 			})
 	}
@@ -1433,14 +1648,8 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 
 func (al *AgentLoop) resolveMessageRoute(msg bus.InboundMessage) (routing.ResolvedRoute, *AgentInstance, error) {
 	registry := al.GetRegistry()
-	route := registry.ResolveRoute(routing.RouteInput{
-		Channel:    msg.Channel,
-		AccountID:  inboundMetadata(msg, metadataKeyAccountID),
-		Peer:       extractPeer(msg),
-		ParentPeer: extractParentPeer(msg),
-		GuildID:    inboundMetadata(msg, metadataKeyGuildID),
-		TeamID:     inboundMetadata(msg, metadataKeyTeamID),
-	})
+	inboundCtx := normalizedInboundContext(msg)
+	route := registry.ResolveRoute(inboundCtx)
 
 	agent, ok := registry.GetAgent(route.AgentID)
 	if !ok {
@@ -1453,11 +1662,64 @@ func (al *AgentLoop) resolveMessageRoute(msg bus.InboundMessage) (routing.Resolv
 	return route, agent, nil
 }
 
-func resolveScopeKey(route routing.ResolvedRoute, msgSessionKey string) string {
-	if msgSessionKey != "" && strings.HasPrefix(msgSessionKey, sessionKeyAgentPrefix) {
+func normalizedInboundContext(msg bus.InboundMessage) bus.InboundContext {
+	return bus.NormalizeInboundMessage(msg).Context
+}
+
+func resolveScopeKey(routeSessionKey, msgSessionKey string) string {
+	if isExplicitSessionKey(msgSessionKey) {
 		return msgSessionKey
 	}
-	return route.SessionKey
+	return routeSessionKey
+}
+
+func isExplicitSessionKey(sessionKey string) bool {
+	return session.IsExplicitSessionKey(sessionKey)
+}
+
+func buildSessionAliases(canonicalKey string, keys ...string) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	aliases := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	canonicalKey = strings.TrimSpace(canonicalKey)
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" || key == canonicalKey {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliases = append(aliases, key)
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	return aliases
+}
+
+func ensureSessionMetadata(store session.SessionStore, key string, scope *session.SessionScope, aliases []string) {
+	if key == "" || scope == nil {
+		return
+	}
+	metaStore, ok := store.(interface {
+		EnsureSessionMetadata(sessionKey string, scope *session.SessionScope, aliases []string)
+	})
+	if !ok {
+		return
+	}
+	metaStore.EnsureSessionMetadata(key, scope, aliases)
+}
+
+func (al *AgentLoop) allocateRouteSession(route routing.ResolvedRoute, msg bus.InboundMessage) session.Allocation {
+	return session.AllocateRouteSession(session.AllocationInput{
+		AgentID:       route.AgentID,
+		Context:       normalizedInboundContext(msg),
+		SessionPolicy: route.SessionPolicy,
+	})
 }
 
 func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, string, bool) {
@@ -1469,21 +1731,9 @@ func (al *AgentLoop) resolveSteeringTarget(msg bus.InboundMessage) (string, stri
 	if err != nil || agent == nil {
 		return "", "", false
 	}
+	allocation := al.allocateRouteSession(route, msg)
 
-	return resolveScopeKey(route, msg.SessionKey), agent.ID, true
-}
-
-func (al *AgentLoop) requeueInboundMessage(msg bus.InboundMessage) error {
-	if al.bus == nil {
-		return nil
-	}
-	pubCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	return al.bus.PublishOutbound(pubCtx, bus.OutboundMessage{
-		Channel: msg.Channel,
-		ChatID:  msg.ChatID,
-		Content: msg.Content,
-	})
+	return resolveScopeKey(allocation.SessionKey, msg.SessionKey), agent.ID, true
 }
 
 func (al *AgentLoop) processSystemMessage(
@@ -1538,13 +1788,22 @@ func (al *AgentLoop) processSystemMessage(
 	}
 
 	// Use the origin session for context
-	sessionKey := routing.BuildAgentMainSessionKey(agent.ID)
+	sessionKey := session.BuildMainSessionKey(agent.ID)
+	dispatch := DispatchRequest{
+		SessionKey:  sessionKey,
+		UserMessage: fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
+	}
+	if originChannel != "" || originChatID != "" {
+		dispatch.InboundContext = &bus.InboundContext{
+			Channel:  originChannel,
+			ChatID:   originChatID,
+			ChatType: "direct",
+			SenderID: msg.SenderID,
+		}
+	}
 
 	return al.runAgentLoop(ctx, agent, processOptions{
-		SessionKey:      sessionKey,
-		Channel:         originChannel,
-		ChatID:          originChatID,
-		UserMessage:     fmt.Sprintf("[System: %s] %s", msg.SenderID, msg.Content),
+		Dispatch:        dispatch,
 		DefaultResponse: "Background task completed.",
 		EnableSummary:   false,
 		SendResponse:    true,
@@ -1558,9 +1817,13 @@ func (al *AgentLoop) runAgentLoop(
 	agent *AgentInstance,
 	opts processOptions,
 ) (string, error) {
+	opts = normalizeProcessOptions(opts)
+
 	// Record last channel for heartbeat notifications (skip internal channels and cli)
-	if opts.Channel != "" && opts.ChatID != "" && !constants.IsInternalChannel(opts.Channel) {
-		channelKey := fmt.Sprintf("%s:%s", opts.Channel, opts.ChatID)
+	if opts.Dispatch.Channel() != "" &&
+		opts.Dispatch.ChatID() != "" &&
+		!constants.IsInternalChannel(opts.Dispatch.Channel()) {
+		channelKey := fmt.Sprintf("%s:%s", opts.Dispatch.Channel(), opts.Dispatch.ChatID())
 		if err := al.RecordLastChannel(channelKey); err != nil {
 			logger.WarnCF(
 				"agent",
@@ -1570,7 +1833,19 @@ func (al *AgentLoop) runAgentLoop(
 		}
 	}
 
-	ts := newTurnState(agent, opts, al.newTurnEventScope(agent.ID, opts.SessionKey))
+	ensureSessionMetadata(
+		agent.Sessions,
+		opts.Dispatch.SessionKey,
+		opts.Dispatch.SessionScope,
+		opts.Dispatch.SessionAliases,
+	)
+
+	turnScope := al.newTurnEventScope(
+		agent.ID,
+		opts.Dispatch.SessionKey,
+		newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope),
+	)
+	ts := newTurnState(agent, opts, turnScope)
 	result, err := al.runTurn(ctx, ts)
 	if err != nil {
 		return "", err
@@ -1590,10 +1865,22 @@ func (al *AgentLoop) runAgentLoop(
 	}
 
 	if opts.SendResponse && result.finalContent != "" {
+		agentID, sessionKey, scope := outboundTurnMetadata(
+			agent.ID,
+			opts.Dispatch.SessionKey,
+			opts.Dispatch.SessionScope,
+		)
 		al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-			Channel: opts.Channel,
-			ChatID:  opts.ChatID,
-			Content: result.finalContent,
+			Context: outboundContextFromInbound(
+				opts.Dispatch.InboundContext,
+				opts.Dispatch.Channel(),
+				opts.Dispatch.ChatID(),
+				opts.Dispatch.ReplyToMessageID(),
+			),
+			AgentID:    agentID,
+			SessionKey: sessionKey,
+			Scope:      scope,
+			Content:    result.finalContent,
 		})
 	}
 
@@ -1602,7 +1889,7 @@ func (al *AgentLoop) runAgentLoop(
 		logger.InfoCF("agent", fmt.Sprintf("Response: %s", responsePreview),
 			map[string]any{
 				"agent_id":     agent.ID,
-				"session_key":  opts.SessionKey,
+				"session_key":  opts.Dispatch.SessionKey,
 				"iterations":   ts.currentIteration(),
 				"final_length": len(result.finalContent),
 			})
@@ -1619,6 +1906,43 @@ func (al *AgentLoop) targetReasoningChannelID(channelName string) (chatID string
 		return ch.ReasoningChannelID()
 	}
 	return ""
+}
+
+func (al *AgentLoop) publishPicoReasoning(ctx context.Context, reasoningContent, chatID string) {
+	if reasoningContent == "" || chatID == "" {
+		return
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	pubCtx, pubCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer pubCancel()
+
+	if err := al.bus.PublishOutbound(pubCtx, bus.OutboundMessage{
+		Context: bus.InboundContext{
+			Channel: "pico",
+			ChatID:  chatID,
+			Raw: map[string]string{
+				metadataKeyMessageKind: messageKindThought,
+			},
+		},
+		Content: reasoningContent,
+	}); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+			errors.Is(err, bus.ErrBusClosed) {
+			logger.DebugCF("agent", "Pico reasoning publish skipped (timeout/cancel)", map[string]any{
+				"channel": "pico",
+				"error":   err.Error(),
+			})
+		} else {
+			logger.WarnCF("agent", "Failed to publish pico reasoning (best-effort)", map[string]any{
+				"channel": "pico",
+				"error":   err.Error(),
+			})
+		}
+	}
 }
 
 func (al *AgentLoop) handleReasoning(
@@ -1642,8 +1966,7 @@ func (al *AgentLoop) handleReasoning(
 	defer pubCancel()
 
 	if err := al.bus.PublishOutbound(pubCtx, bus.OutboundMessage{
-		Channel: channelName,
-		ChatID:  channelID,
+		Context: bus.NewOutboundContext(channelName, channelID, ""),
 		Content: reasoningContent,
 	}); err != nil {
 		// Treat context.DeadlineExceeded / context.Canceled as expected
@@ -1697,8 +2020,6 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 		EventKindTurnStart,
 		ts.eventMeta("runTurn", "turn.start"),
 		TurnStartPayload{
-			Channel:     ts.channel,
-			ChatID:      ts.chatID,
 			UserMessage: ts.userMessage,
 			MediaCount:  len(ts.media),
 		},
@@ -1726,7 +2047,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 		ts.media,
 		ts.channel,
 		ts.chatID,
-		ts.opts.SenderID,
+		ts.opts.Dispatch.SenderID(),
 		ts.opts.SenderDisplayName,
 		activeSkillNames(ts.agent, ts.opts)...,
 	)
@@ -1743,6 +2064,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 			if err := al.contextManager.Compact(turnCtx, &CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonProactive,
+				Budget:     ts.agent.ContextWindow,
 			}); err != nil {
 				logger.WarnCF("agent", "Proactive compact failed", map[string]any{
 					"session_key": ts.sessionKey,
@@ -1762,7 +2084,7 @@ func (al *AgentLoop) runTurn(ctx context.Context, ts *turnState) (turnResult, er
 			messages = ts.agent.ContextBuilder.BuildMessages(
 				history, summary, ts.userMessage,
 				ts.media, ts.channel, ts.chatID,
-				ts.opts.SenderID, ts.opts.SenderDisplayName,
+				ts.opts.Dispatch.SenderID(), ts.opts.SenderDisplayName,
 				activeSkillNames(ts.agent, ts.opts)...,
 			)
 			messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
@@ -1858,6 +2180,7 @@ turnLoop:
 				if !ts.opts.NoHistory {
 					ts.agent.Sessions.AddFullMessage(ts.sessionKey, pm)
 					ts.recordPersistedMessage(pm)
+					ts.ingestMessage(turnCtx, al, pm)
 				}
 				logger.InfoCF("agent", "Injected steering message into context",
 					map[string]any{
@@ -1947,12 +2270,11 @@ turnLoop:
 		if al.hooks != nil {
 			llmReq, decision := al.hooks.BeforeLLM(turnCtx, &LLMHookRequest{
 				Meta:             ts.eventMeta("runTurn", "turn.llm.request"),
+				Context:          cloneTurnContext(ts.turnCtx),
 				Model:            llmModel,
 				Messages:         callMessages,
 				Tools:            providerToolDefs,
 				Options:          llmOpts,
-				Channel:          ts.channel,
-				ChatID:           ts.chatID,
 				GracefulTerminal: gracefulTerminal,
 			})
 			switch decision.normalizedAction() {
@@ -2019,7 +2341,11 @@ turnLoop:
 					providerCtx,
 					activeCandidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
-						return activeProvider.Chat(ctx, messagesForCall, toolDefsForCall, model, llmOpts)
+						candidateProvider := activeProvider
+						if cp, ok := ts.agent.CandidateProviders[providers.ModelKey(provider, model)]; ok {
+							candidateProvider = cp
+						}
+						return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, model, llmOpts)
 					},
 				)
 				if fbErr != nil {
@@ -2049,6 +2375,36 @@ turnLoop:
 			if ts.hardAbortRequested() && errors.Is(err, context.Canceled) {
 				turnStatus = TurnEndStatusAborted
 				return al.abortTurn(ts)
+			}
+
+			// Retry without media if vision is unsupported
+			if hasMediaRefs(callMessages) && isVisionUnsupportedError(err) && retry < maxRetries {
+				al.emitEvent(
+					EventKindLLMRetry,
+					ts.eventMeta("runTurn", "turn.llm.retry"),
+					LLMRetryPayload{
+						Attempt:    retry + 1,
+						MaxRetries: maxRetries,
+						Reason:     "vision_unsupported",
+						Error:      err.Error(),
+						Backoff:    0,
+					},
+				)
+				logger.WarnCF("agent", "Vision unsupported, retrying without media", map[string]any{
+					"error": err.Error(),
+					"retry": retry,
+				})
+				callMessages = stripMessageMedia(callMessages)
+				// Also strip media from session history to prevent future errors
+				if !ts.opts.NoHistory {
+					history = stripMessageMedia(history)
+					ts.agent.Sessions.SetHistory(ts.sessionKey, history)
+					for i := range ts.persistedMessages {
+						ts.persistedMessages[i].Media = nil
+					}
+					ts.refreshRestorePointFromSession(ts.agent)
+				}
+				continue
 			}
 
 			errMsg := strings.ToLower(err.Error())
@@ -2119,16 +2475,16 @@ turnLoop:
 				)
 
 				if retry == 0 && !constants.IsInternalChannel(ts.channel) {
-					al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-						Channel: ts.channel,
-						ChatID:  ts.chatID,
-						Content: "Context window exceeded. Compressing history and retrying...",
-					})
+					al.bus.PublishOutbound(ctx, outboundMessageForTurn(
+						ts,
+						"Context window exceeded. Compressing history and retrying...",
+					))
 				}
 
 				if compactErr := al.contextManager.Compact(turnCtx, &CompactRequest{
 					SessionKey: ts.sessionKey,
 					Reason:     ContextCompressReasonRetry,
+					Budget:     ts.agent.ContextWindow,
 				}); compactErr != nil {
 					logger.WarnCF("agent", "Context overflow compact failed", map[string]any{
 						"session_key": ts.sessionKey,
@@ -2147,7 +2503,7 @@ turnLoop:
 				}
 				messages = ts.agent.ContextBuilder.BuildMessages(
 					history, summary, "",
-					nil, ts.channel, ts.chatID, ts.opts.SenderID, ts.opts.SenderDisplayName,
+					nil, ts.channel, ts.chatID, ts.opts.Dispatch.SenderID(), ts.opts.SenderDisplayName,
 					activeSkillNames(ts.agent, ts.opts)...,
 				)
 				callMessages = messages
@@ -2182,10 +2538,9 @@ turnLoop:
 		if al.hooks != nil {
 			llmResp, decision := al.hooks.AfterLLM(turnCtx, &LLMHookResponse{
 				Meta:     ts.eventMeta("runTurn", "turn.llm.response"),
+				Context:  cloneTurnContext(ts.turnCtx),
 				Model:    llmModel,
 				Response: response,
-				Channel:  ts.channel,
-				ChatID:   ts.chatID,
 			})
 			switch decision.normalizedAction() {
 			case HookActionContinue, HookActionModify:
@@ -2215,12 +2570,16 @@ turnLoop:
 		if reasoningContent == "" {
 			reasoningContent = response.ReasoningContent
 		}
-		go al.handleReasoning(
-			turnCtx,
-			reasoningContent,
-			ts.channel,
-			al.targetReasoningChannelID(ts.channel),
-		)
+		if ts.channel == "pico" {
+			go al.publishPicoReasoning(turnCtx, reasoningContent, ts.chatID)
+		} else {
+			go al.handleReasoning(
+				turnCtx,
+				reasoningContent,
+				ts.channel,
+				al.targetReasoningChannelID(ts.channel),
+			)
+		}
 		al.emitEvent(
 			EventKindLLMResponse,
 			ts.eventMeta("runTurn", "turn.llm.response"),
@@ -2247,9 +2606,29 @@ turnLoop:
 		}
 		logger.DebugCF("agent", "LLM response", llmResponseFields)
 
+		if al.bus != nil && ts.channel == "pico" && len(response.ToolCalls) > 0 && ts.opts.AllowInterimPicoPublish {
+			if strings.TrimSpace(response.Content) != "" {
+				outCtx, outCancel := context.WithTimeout(turnCtx, 3*time.Second)
+				err := al.bus.PublishOutbound(outCtx, bus.OutboundMessage{
+					Channel: ts.channel,
+					ChatID:  ts.chatID,
+					Content: response.Content,
+				})
+				outCancel()
+				if err != nil {
+					logger.WarnCF("agent", "Failed to publish pico interim tool-call content", map[string]any{
+						"error":     err.Error(),
+						"channel":   ts.channel,
+						"chat_id":   ts.chatID,
+						"iteration": iteration,
+					})
+				}
+			}
+		}
+
 		if len(response.ToolCalls) == 0 || gracefulTerminal {
 			responseContent := response.Content
-			if responseContent == "" && response.ReasoningContent != "" {
+			if responseContent == "" && response.ReasoningContent != "" && ts.channel != "pico" {
 				responseContent = response.ReasoningContent
 			}
 			if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
@@ -2335,10 +2714,9 @@ turnLoop:
 			if al.hooks != nil {
 				toolReq, decision := al.hooks.BeforeTool(turnCtx, &ToolCallHookRequest{
 					Meta:      ts.eventMeta("runTurn", "turn.tool.before"),
+					Context:   cloneTurnContext(ts.turnCtx),
 					Tool:      toolName,
 					Arguments: toolArgs,
-					Channel:   ts.channel,
-					ChatID:    ts.chatID,
 				})
 				switch decision.normalizedAction() {
 				case HookActionContinue, HookActionModify:
@@ -2346,6 +2724,238 @@ turnLoop:
 						toolName = toolReq.Tool
 						toolArgs = toolReq.Arguments
 					}
+				case HookActionRespond:
+					// Hook returns result directly, skip tool execution.
+					// SECURITY: This bypasses ApproveTool, allowing hooks to respond
+					// for any tool name without approval. This is intentional for
+					// plugin tools but means a before_tool hook can override even
+					// sensitive tools like bash. Hook configuration should be
+					// carefully reviewed to prevent unauthorized tool execution.
+					if toolReq != nil && toolReq.HookResult != nil {
+						hookResult := toolReq.HookResult
+
+						argsJSON, _ := json.Marshal(toolArgs)
+						argsPreview := utils.Truncate(string(argsJSON), 200)
+						logger.InfoCF("agent", fmt.Sprintf("Tool call (hook respond): %s(%s)", toolName, argsPreview),
+							map[string]any{
+								"agent_id":  ts.agent.ID,
+								"tool":      toolName,
+								"iteration": iteration,
+							})
+
+						// Emit ToolExecStart event (same as normal tool execution)
+						al.emitEvent(
+							EventKindToolExecStart,
+							ts.eventMeta("runTurn", "turn.tool.start"),
+							ToolExecStartPayload{
+								Tool:      toolName,
+								Arguments: cloneEventArguments(toolArgs),
+							},
+						)
+
+						// Send tool feedback to chat channel if enabled (same as normal tool execution)
+						if al.cfg.Agents.Defaults.IsToolFeedbackEnabled() &&
+							ts.channel != "" &&
+							!ts.opts.SuppressToolFeedback {
+							argsJSON, _ := json.Marshal(toolArgs)
+							feedbackPreview := utils.Truncate(
+								string(argsJSON),
+								al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength(),
+							)
+							feedbackMsg := utils.FormatToolFeedbackMessage(toolName, feedbackPreview)
+							fbCtx, fbCancel := context.WithTimeout(turnCtx, 3*time.Second)
+							_ = al.bus.PublishOutbound(fbCtx, bus.OutboundMessage{
+								Channel: ts.channel,
+								ChatID:  ts.chatID,
+								Content: feedbackMsg,
+							})
+							fbCancel()
+						}
+
+						toolDuration := time.Duration(0) // Hook execution time unknown
+
+						// Send ForUser content to user
+						// For ResponseHandled results, send regardless of SendResponse setting,
+						// same as normal tool execution path.
+						shouldSendForUser := !hookResult.Silent && hookResult.ForUser != "" &&
+							(ts.opts.SendResponse || hookResult.ResponseHandled)
+						if shouldSendForUser {
+							al.bus.PublishOutbound(ctx, bus.OutboundMessage{
+								Context: bus.InboundContext{
+									Channel: ts.channel,
+									ChatID:  ts.chatID,
+									Raw: map[string]string{
+										"is_tool_call": "true",
+									},
+								},
+								Content: hookResult.ForUser,
+							})
+						}
+
+						// Handle media from hook result (same as normal tool execution)
+						if len(hookResult.Media) > 0 && hookResult.ResponseHandled {
+							parts := make([]bus.MediaPart, 0, len(hookResult.Media))
+							for _, ref := range hookResult.Media {
+								part := bus.MediaPart{Ref: ref}
+								if al.mediaStore != nil {
+									if _, meta, err := al.mediaStore.ResolveWithMeta(ref); err == nil {
+										part.Filename = meta.Filename
+										part.ContentType = meta.ContentType
+										part.Type = inferMediaType(meta.Filename, meta.ContentType)
+									}
+								}
+								parts = append(parts, part)
+							}
+							outboundMedia := bus.OutboundMediaMessage{
+								Channel: ts.channel,
+								ChatID:  ts.chatID,
+								Parts:   parts,
+							}
+							if al.channelManager != nil && ts.channel != "" && !constants.IsInternalChannel(ts.channel) {
+								if err := al.channelManager.SendMedia(ctx, outboundMedia); err != nil {
+									logger.WarnCF("agent", "Failed to deliver hook media",
+										map[string]any{
+											"agent_id": ts.agent.ID,
+											"tool":     toolName,
+											"channel":  ts.channel,
+											"chat_id":  ts.chatID,
+											"error":    err.Error(),
+										})
+									// Same as normal tool execution: notify LLM about delivery failure
+									hookResult.IsError = true
+									hookResult.ForLLM = fmt.Sprintf("failed to deliver attachment: %v", err)
+								}
+							} else if al.bus != nil {
+								al.bus.PublishOutboundMedia(ctx, outboundMedia)
+								// Same as normal tool execution: bus only queues, media not yet delivered
+								hookResult.ResponseHandled = false
+							}
+						}
+
+						// Track response handling status (same as normal tool execution)
+						if !hookResult.ResponseHandled {
+							allResponsesHandled = false
+						}
+
+						// Build tool message
+						contentForLLM := hookResult.ContentForLLM()
+						if al.cfg.Tools.IsFilterSensitiveDataEnabled() {
+							contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
+						}
+
+						toolResultMsg := providers.Message{
+							Role:       "tool",
+							Content:    contentForLLM,
+							ToolCallID: tc.ID,
+						}
+
+						// Handle media for LLM vision (same as normal tool execution)
+						if len(hookResult.Media) > 0 && !hookResult.ResponseHandled {
+							hookResult.ArtifactTags = buildArtifactTags(al.mediaStore, hookResult.Media)
+							// Recalculate contentForLLM after adding ArtifactTags
+							contentForLLM = hookResult.ContentForLLM()
+							if al.cfg.Tools.IsFilterSensitiveDataEnabled() {
+								contentForLLM = al.cfg.FilterSensitiveData(contentForLLM)
+							}
+							toolResultMsg.Content = contentForLLM
+							toolResultMsg.Media = append(toolResultMsg.Media, hookResult.Media...)
+						}
+
+						// Emit ToolExecEnd event (after filtering, same as normal tool execution)
+						al.emitEvent(
+							EventKindToolExecEnd,
+							ts.eventMeta("runTurn", "turn.tool.end"),
+							ToolExecEndPayload{
+								Tool:       toolName,
+								Duration:   toolDuration,
+								ForLLMLen:  len(contentForLLM),
+								ForUserLen: len(hookResult.ForUser),
+								IsError:    hookResult.IsError,
+								Async:      hookResult.Async,
+							},
+						)
+
+						messages = append(messages, toolResultMsg)
+						if !ts.opts.NoHistory {
+							ts.agent.Sessions.AddFullMessage(ts.sessionKey, toolResultMsg)
+							ts.recordPersistedMessage(toolResultMsg)
+							ts.ingestMessage(turnCtx, al, toolResultMsg)
+						}
+
+						// Same as normal tool execution: check for steering/interrupt/SubTurn after each tool
+						if steerMsgs := al.dequeueSteeringMessagesForScope(ts.sessionKey); len(steerMsgs) > 0 {
+							pendingMessages = append(pendingMessages, steerMsgs...)
+						}
+
+						skipReason := ""
+						skipMessage := ""
+						if len(pendingMessages) > 0 {
+							skipReason = "queued user steering message"
+							skipMessage = "Skipped due to queued user message."
+						} else if gracefulPending, _ := ts.gracefulInterruptRequested(); gracefulPending {
+							skipReason = "graceful interrupt requested"
+							skipMessage = "Skipped due to graceful interrupt."
+						}
+
+						if skipReason != "" {
+							remaining := len(normalizedToolCalls) - i - 1
+							if remaining > 0 {
+								logger.InfoCF("agent", "Turn checkpoint: skipping remaining tools after hook respond",
+									map[string]any{
+										"agent_id":  ts.agent.ID,
+										"completed": i + 1,
+										"skipped":   remaining,
+										"reason":    skipReason,
+									})
+								for j := i + 1; j < len(normalizedToolCalls); j++ {
+									skippedTC := normalizedToolCalls[j]
+									al.emitEvent(
+										EventKindToolExecSkipped,
+										ts.eventMeta("runTurn", "turn.tool.skipped"),
+										ToolExecSkippedPayload{
+											Tool:   skippedTC.Name,
+											Reason: skipReason,
+										},
+									)
+									skippedMsg := providers.Message{
+										Role:       "tool",
+										Content:    skipMessage,
+										ToolCallID: skippedTC.ID,
+									}
+									messages = append(messages, skippedMsg)
+									if !ts.opts.NoHistory {
+										ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+										ts.recordPersistedMessage(skippedMsg)
+									}
+								}
+							}
+							break
+						}
+
+						// Also poll for any SubTurn results that arrived during tool execution.
+						if ts.pendingResults != nil {
+							select {
+							case result, ok := <-ts.pendingResults:
+								if ok && result != nil && result.ForLLM != "" {
+									content := al.cfg.FilterSensitiveData(result.ForLLM)
+									msg := providers.Message{Role: "user", Content: fmt.Sprintf("[SubTurn Result] %s", content)}
+									messages = append(messages, msg)
+									ts.agent.Sessions.AddFullMessage(ts.sessionKey, msg)
+								}
+							default:
+								// No results available
+							}
+						}
+
+						continue
+					}
+					// If no HookResult, fall back to continue with warning
+					logger.WarnCF("agent", "Hook returned respond action but no HookResult provided",
+						map[string]any{
+							"agent_id": ts.agent.ID,
+							"tool":     toolName,
+							"action":   "respond",
+						})
 				case HookActionDenyTool:
 					allResponsesHandled = false
 					denyContent := hookDeniedToolContent("Tool execution denied by hook", decision.Reason)
@@ -2381,10 +2991,9 @@ turnLoop:
 			if al.hooks != nil {
 				approval := al.hooks.ApproveTool(turnCtx, &ToolApprovalRequest{
 					Meta:      ts.eventMeta("runTurn", "turn.tool.approve"),
+					Context:   cloneTurnContext(ts.turnCtx),
 					Tool:      toolName,
 					Arguments: toolArgs,
-					Channel:   ts.channel,
-					ChatID:    ts.chatID,
 				})
 				if !approval.Approved {
 					allResponsesHandled = false
@@ -2436,13 +3045,9 @@ turnLoop:
 					string(argsJSON),
 					al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength(),
 				)
-				feedbackMsg := fmt.Sprintf("\U0001f527 `%s`\n```\n%s\n```", tc.Name, feedbackPreview)
+				feedbackMsg := utils.FormatToolFeedbackMessage(tc.Name, feedbackPreview)
 				fbCtx, fbCancel := context.WithTimeout(turnCtx, 3*time.Second)
-				_ = al.bus.PublishOutbound(fbCtx, bus.OutboundMessage{
-					Channel: ts.channel,
-					ChatID:  ts.chatID,
-					Content: feedbackMsg,
-				})
+				_ = al.bus.PublishOutbound(fbCtx, outboundMessageForTurn(ts, feedbackMsg))
 				fbCancel()
 			}
 
@@ -2455,11 +3060,7 @@ turnLoop:
 				if !result.Silent && result.ForUser != "" {
 					outCtx, outCancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer outCancel()
-					_ = al.bus.PublishOutbound(outCtx, bus.OutboundMessage{
-						Channel: ts.channel,
-						ChatID:  ts.chatID,
-						Content: result.ForUser,
-					})
+					_ = al.bus.PublishOutbound(outCtx, outboundMessageForTurn(ts, result.ForUser))
 				}
 
 				// Determine content for the agent loop (ForLLM or error).
@@ -2482,8 +3083,6 @@ turnLoop:
 					ts.scope.meta(toolIteration, "runTurn", "turn.follow_up.queued"),
 					FollowUpQueuedPayload{
 						SourceTool: asyncToolName,
-						Channel:    ts.channel,
-						ChatID:     ts.chatID,
 						ContentLen: len(content),
 					},
 				)
@@ -2491,10 +3090,13 @@ turnLoop:
 				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer pubCancel()
 				_ = al.bus.PublishInbound(pubCtx, bus.InboundMessage{
-					Channel:  "system",
-					SenderID: fmt.Sprintf("async:%s", asyncToolName),
-					ChatID:   fmt.Sprintf("%s:%s", ts.channel, ts.chatID),
-					Content:  content,
+					Context: bus.InboundContext{
+						Channel:  "system",
+						ChatID:   fmt.Sprintf("%s:%s", ts.channel, ts.chatID),
+						ChatType: "direct",
+						SenderID: fmt.Sprintf("async:%s", asyncToolName),
+					},
+					Content: content,
 				})
 			}
 
@@ -2503,8 +3105,14 @@ turnLoop:
 				turnCtx,
 				ts.channel,
 				ts.chatID,
-				ts.opts.MessageID,
-				ts.opts.ReplyToMessageID,
+				ts.opts.Dispatch.MessageID(),
+				ts.opts.Dispatch.ReplyToMessageID(),
+			)
+			execCtx = tools.WithToolSessionContext(
+				execCtx,
+				ts.agent.ID,
+				ts.sessionKey,
+				ts.opts.Dispatch.SessionScope,
 			)
 			toolResult := ts.agent.Tools.ExecuteWithContext(
 				execCtx,
@@ -2524,12 +3132,11 @@ turnLoop:
 			if al.hooks != nil {
 				toolResp, decision := al.hooks.AfterTool(turnCtx, &ToolResultHookResponse{
 					Meta:      ts.eventMeta("runTurn", "turn.tool.after"),
+					Context:   cloneTurnContext(ts.turnCtx),
 					Tool:      toolName,
 					Arguments: toolArgs,
 					Result:    toolResult,
 					Duration:  toolDuration,
-					Channel:   ts.channel,
-					ChatID:    ts.chatID,
 				})
 				switch decision.normalizedAction() {
 				case HookActionContinue, HookActionModify:
@@ -2555,27 +3162,6 @@ turnLoop:
 				toolResult = tools.ErrorResult("hook returned nil tool result")
 			}
 
-			// Send ForUser if not silent and has content.
-			// For ResponseHandled tools, send regardless of SendResponse setting,
-			// since they've already handled the response (e.g., send_tts, send_file).
-			shouldSendForUser := !toolResult.Silent && toolResult.ForUser != "" &&
-				(ts.opts.SendResponse || toolResult.ResponseHandled)
-			if shouldSendForUser {
-				al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-					Channel: ts.channel,
-					ChatID:  ts.chatID,
-					Content: toolResult.ForUser,
-					Metadata: map[string]string{
-						"is_tool_call": "true",
-					},
-				})
-				logger.DebugCF("agent", "Sent tool result to user",
-					map[string]any{
-						"tool":        toolName,
-						"content_len": len(toolResult.ForUser),
-					})
-			}
-
 			if len(toolResult.Media) > 0 && toolResult.ResponseHandled {
 				parts := make([]bus.MediaPart, 0, len(toolResult.Media))
 				for _, ref := range toolResult.Media {
@@ -2592,7 +3178,16 @@ turnLoop:
 				outboundMedia := bus.OutboundMediaMessage{
 					Channel: ts.channel,
 					ChatID:  ts.chatID,
-					Parts:   parts,
+					Context: outboundContextFromInbound(
+						ts.opts.Dispatch.InboundContext,
+						ts.channel,
+						ts.chatID,
+						ts.opts.Dispatch.ReplyToMessageID(),
+					),
+					AgentID:    ts.agent.ID,
+					SessionKey: ts.sessionKey,
+					Scope:      outboundScopeFromSessionScope(ts.opts.Dispatch.SessionScope),
+					Parts:      parts,
 				}
 				if al.channelManager != nil && ts.channel != "" && !constants.IsInternalChannel(ts.channel) {
 					if err := al.channelManager.SendMedia(ctx, outboundMedia); err != nil {
@@ -2628,6 +3223,17 @@ turnLoop:
 				allResponsesHandled = false
 			}
 
+			shouldSendForUser := !toolResult.Silent &&
+				toolResult.ForUser != "" &&
+				(ts.opts.SendResponse || toolResult.ResponseHandled)
+			if shouldSendForUser {
+				al.bus.PublishOutbound(ctx, outboundMessageForTurn(ts, toolResult.ForUser))
+				logger.DebugCF("agent", "Sent tool result to user",
+					map[string]any{
+						"tool":        toolName,
+						"content_len": len(toolResult.ForUser),
+					})
+			}
 			contentForLLM := toolResult.ContentForLLM()
 
 			// Filter sensitive data (API keys, tokens, secrets) before sending to LLM
@@ -2774,7 +3380,7 @@ turnLoop:
 				}
 			}
 			if ts.opts.EnableSummary {
-				al.contextManager.Compact(turnCtx, &CompactRequest{SessionKey: ts.sessionKey, Reason: ContextCompressReasonSummarize})
+				al.contextManager.Compact(turnCtx, &CompactRequest{SessionKey: ts.sessionKey, Reason: ContextCompressReasonSummarize, Budget: ts.agent.ContextWindow})
 			}
 
 			ts.setPhase(TurnPhaseCompleted)
@@ -2850,6 +3456,7 @@ turnLoop:
 			&CompactRequest{
 				SessionKey: ts.sessionKey,
 				Reason:     ContextCompressReasonSummarize,
+				Budget:     ts.agent.ContextWindow,
 			},
 		)
 	}
@@ -3056,6 +3663,8 @@ func (al *AgentLoop) handleCommand(
 	agent *AgentInstance,
 	opts *processOptions,
 ) (string, bool) {
+	normalizeProcessOptionsInPlace(opts)
+
 	if !commands.HasCommandPrefix(msg.Content) {
 		return "", false
 	}
@@ -3068,7 +3677,7 @@ func (al *AgentLoop) handleCommand(
 		return "", false
 	}
 
-	rt := al.buildCommandsRuntime(agent, opts)
+	rt := al.buildCommandsRuntime(ctx, agent, opts)
 	executor := commands.NewExecutor(al.cmdRegistry, rt)
 
 	var commandReply string
@@ -3137,6 +3746,8 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 	agent *AgentInstance,
 	opts *processOptions,
 ) (matched bool, handled bool, reply string) {
+	normalizeProcessOptionsInPlace(opts)
+
 	cmdName, ok := commands.CommandName(raw)
 	if !ok || cmdName != "use" {
 		return false, false, ""
@@ -3154,7 +3765,7 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 	arg := strings.TrimSpace(parts[1])
 	if strings.EqualFold(arg, "clear") || strings.EqualFold(arg, "off") {
 		if opts != nil {
-			al.clearPendingSkills(opts.SessionKey)
+			al.clearPendingSkills(opts.Dispatch.SessionKey)
 		}
 		return true, true, "Cleared pending skill override."
 	}
@@ -3165,10 +3776,10 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 	}
 
 	if len(parts) < 3 {
-		if opts == nil || strings.TrimSpace(opts.SessionKey) == "" {
+		if opts == nil || strings.TrimSpace(opts.Dispatch.SessionKey) == "" {
 			return true, true, commandsUnavailableSkillMessage()
 		}
-		al.setPendingSkills(opts.SessionKey, []string{skillName})
+		al.setPendingSkills(opts.Dispatch.SessionKey, []string{skillName})
 		return true, true, fmt.Sprintf(
 			"Skill %q is armed for your next message. Send your next prompt normally, or use /use clear to cancel.",
 			skillName,
@@ -3182,13 +3793,20 @@ func (al *AgentLoop) applyExplicitSkillCommand(
 
 	if opts != nil {
 		opts.ForcedSkills = append(opts.ForcedSkills, skillName)
+		opts.Dispatch.UserMessage = message
 		opts.UserMessage = message
 	}
 
 	return true, false, ""
 }
 
-func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOptions) *commands.Runtime {
+func (al *AgentLoop) buildCommandsRuntime(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts *processOptions,
+) *commands.Runtime {
+	normalizeProcessOptionsInPlace(opts)
+
 	registry := al.GetRegistry()
 	cfg := al.GetConfig()
 	rt := &commands.Runtime{
@@ -3270,17 +3888,391 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 			if opts == nil {
 				return fmt.Errorf("process options not available")
 			}
-			if agent.Sessions == nil {
-				return fmt.Errorf("sessions not initialized for agent")
-			}
+			return al.contextManager.Clear(ctx, opts.SessionKey)
+		}
 
-			agent.Sessions.SetHistory(opts.SessionKey, make([]providers.Message, 0))
-			agent.Sessions.SetSummary(opts.SessionKey, "")
-			agent.Sessions.Save(opts.SessionKey)
-			return nil
+		rt.AskSideQuestion = func(ctx context.Context, question string) (string, error) {
+			return al.askSideQuestion(ctx, agent, opts, question)
 		}
 	}
 	return rt
+}
+
+// askSideQuestion handles /btw commands by creating an isolated provider instance
+// that doesn't share state with the main conversation provider.
+func (al *AgentLoop) askSideQuestion(
+	ctx context.Context,
+	agent *AgentInstance,
+	opts *processOptions,
+	question string,
+) (string, error) {
+	if agent == nil {
+		return "", fmt.Errorf("askSideQuestion: no agent available for /btw")
+	}
+
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return "", fmt.Errorf("askSideQuestion: %w", fmt.Errorf("Usage: /btw <question>"))
+	}
+
+	if opts != nil {
+		normalizeProcessOptionsInPlace(opts)
+	}
+
+	var media []string
+	var channel, chatID, senderID, senderDisplayName string
+	if opts != nil {
+		media = opts.Media
+		channel = opts.Channel
+		chatID = opts.ChatID
+		senderID = opts.SenderID
+		senderDisplayName = opts.SenderDisplayName
+	}
+
+	// Build messages with context but WITHOUT adding to session history
+	var history []providers.Message
+	var summary string
+	if opts != nil && !opts.NoHistory {
+		if resp, err := al.contextManager.Assemble(ctx, &AssembleRequest{
+			SessionKey: opts.SessionKey,
+			Budget:     agent.ContextWindow,
+			MaxTokens:  agent.MaxTokens,
+		}); err == nil && resp != nil {
+			history = resp.History
+			summary = resp.Summary
+		}
+	}
+
+	messages := agent.ContextBuilder.BuildMessages(
+		history,
+		summary,
+		question,
+		media,
+		channel,
+		chatID,
+		senderID,
+		senderDisplayName,
+	)
+
+	maxMediaSize := al.GetConfig().Agents.Defaults.GetMaxMediaSize()
+	messages = resolveMediaRefs(messages, al.mediaStore, maxMediaSize)
+
+	activeCandidates, activeModel, usedLight := al.selectCandidates(agent, question, messages)
+	selectedModelName := sideQuestionModelName(agent, usedLight)
+
+	llmOpts := map[string]any{
+		"max_tokens":       agent.MaxTokens,
+		"temperature":      agent.Temperature,
+		"prompt_cache_key": agent.ID + ":btw",
+	}
+
+	hookModelChanged := false
+	callProvider := func(
+		ctx context.Context,
+		candidate providers.FallbackCandidate,
+		model string,
+		forceModel bool,
+		callMessages []providers.Message,
+	) (*providers.LLMResponse, error) {
+		provider, providerModel, cleanup, err := al.isolatedSideQuestionProvider(agent, selectedModelName, candidate)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		if !forceModel || strings.TrimSpace(model) == "" {
+			model = providerModel
+		}
+		callOpts := llmOpts
+		if _, exists := callOpts["thinking_level"]; !exists && agent.ThinkingLevel != ThinkingOff {
+			if tc, ok := provider.(providers.ThinkingCapable); ok && tc.SupportsThinking() {
+				callOpts = shallowCloneLLMOptions(llmOpts)
+				callOpts["thinking_level"] = string(agent.ThinkingLevel)
+			}
+		}
+		return provider.Chat(ctx, callMessages, nil, model, callOpts)
+	}
+
+	turnCtx := newTurnContext(nil, nil, nil)
+	if opts != nil {
+		turnCtx = newTurnContext(opts.Dispatch.InboundContext, opts.Dispatch.RouteResult, opts.Dispatch.SessionScope)
+	}
+	llmModel := activeModel
+	if al.hooks != nil {
+		llmReq, decision := al.hooks.BeforeLLM(ctx, &LLMHookRequest{
+			Meta: EventMeta{
+				Source:      "askSideQuestion",
+				TracePath:   "turn.llm.request",
+				turnContext: cloneTurnContext(turnCtx),
+			},
+			Context:          cloneTurnContext(turnCtx),
+			Model:            llmModel,
+			Messages:         messages,
+			Tools:            nil,
+			Options:          llmOpts,
+			GracefulTerminal: false,
+		})
+		switch decision.normalizedAction() {
+		case HookActionContinue, HookActionModify:
+			if llmReq != nil {
+				if strings.TrimSpace(llmReq.Model) != "" && llmReq.Model != llmModel {
+					hookModelChanged = true
+				}
+				llmModel = llmReq.Model
+				messages = llmReq.Messages
+				llmOpts = llmReq.Options
+			}
+		case HookActionAbortTurn:
+			reason := decision.Reason
+			if reason == "" {
+				reason = "hook requested turn abort"
+			}
+			return "", fmt.Errorf("hook aborted turn during before_llm: %s", reason)
+		case HookActionHardAbort:
+			reason := decision.Reason
+			if reason == "" {
+				reason = "hook requested turn abort"
+			}
+			return "", fmt.Errorf("hook aborted turn during before_llm: %s", reason)
+		}
+	}
+	if hookModelChanged {
+		// Hook-selected models must not continue through the pre-hook fallback
+		// candidate list, otherwise fallback execution would call the original
+		// candidate model and silently ignore the hook decision.
+		activeCandidates = nil
+	}
+
+	callSideLLM := func(callMessages []providers.Message) (*providers.LLMResponse, error) {
+		if len(activeCandidates) > 1 && al.fallback != nil {
+			fbResult, err := al.fallback.Execute(
+				ctx,
+				activeCandidates,
+				func(ctx context.Context, providerName, model string) (*providers.LLMResponse, error) {
+					candidate := providers.FallbackCandidate{Provider: providerName, Model: model}
+					for _, activeCandidate := range activeCandidates {
+						if activeCandidate.Provider == providerName && activeCandidate.Model == model {
+							candidate = activeCandidate
+							break
+						}
+					}
+					return callProvider(ctx, candidate, model, false, callMessages)
+				},
+			)
+			if err != nil {
+				return nil, err
+			}
+			return fbResult.Response, nil
+		}
+
+		var candidate providers.FallbackCandidate
+		if len(activeCandidates) > 0 {
+			candidate = activeCandidates[0]
+		}
+		return callProvider(ctx, candidate, llmModel, hookModelChanged, callMessages)
+	}
+
+	// Retry without media if vision is unsupported
+	// Note: Vision retry is only applied to the initial call. If fallback chain
+	// is used, vision errors from fallback providers will not trigger retry.
+	var resp *providers.LLMResponse
+	var err error
+	resp, err = callSideLLM(messages)
+	if err != nil && hasMediaRefs(messages) && isVisionUnsupportedError(err) {
+		al.emitEvent(
+			EventKindLLMRetry,
+			EventMeta{
+				Source:      "askSideQuestion",
+				TracePath:   "turn.llm.retry",
+				turnContext: cloneTurnContext(turnCtx),
+			},
+			LLMRetryPayload{
+				Attempt:    1,
+				MaxRetries: 1,
+				Reason:     "vision_unsupported",
+				Error:      err.Error(),
+				Backoff:    0,
+			},
+		)
+		messagesWithoutMedia := stripMessageMedia(messages)
+		resp, err = callSideLLM(messagesWithoutMedia)
+	}
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", nil
+	}
+
+	// Apply after_llm hooks
+	if al.hooks != nil {
+		llmResp, decision := al.hooks.AfterLLM(ctx, &LLMHookResponse{
+			Meta: EventMeta{
+				Source:      "askSideQuestion",
+				TracePath:   "turn.llm.response",
+				turnContext: cloneTurnContext(turnCtx),
+			},
+			Context:  cloneTurnContext(turnCtx),
+			Model:    llmModel,
+			Response: resp,
+		})
+		switch decision.normalizedAction() {
+		case HookActionContinue, HookActionModify:
+			if llmResp != nil && llmResp.Response != nil {
+				resp = llmResp.Response
+			}
+		case HookActionAbortTurn, HookActionHardAbort:
+			reason := decision.Reason
+			if reason == "" {
+				reason = "hook requested turn abort"
+			}
+			return "", fmt.Errorf("hook aborted turn during after_llm: %s", reason)
+		}
+	}
+
+	return sideQuestionResponseContent(resp), nil
+}
+
+func sideQuestionResponseContent(response *providers.LLMResponse) string {
+	if response == nil {
+		return ""
+	}
+	if response.Content != "" {
+		return response.Content
+	}
+	return response.ReasoningContent
+}
+
+// shallowCloneLLMOptions creates a shallow copy of LLM options map.
+// Note: This is a shallow copy - nested maps/slices are shared.
+func shallowCloneLLMOptions(opts map[string]any) map[string]any {
+	clone := make(map[string]any, len(opts))
+	for k, v := range opts {
+		clone[k] = v
+	}
+	return clone
+}
+
+// hasMediaRefs checks if any message has media references.
+func hasMediaRefs(messages []providers.Message) bool {
+	for _, msg := range messages {
+		if len(msg.Media) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isolatedSideQuestionProvider creates a separate provider instance for /btw commands
+// to avoid sharing state with the main conversation provider.
+func (al *AgentLoop) isolatedSideQuestionProvider(
+	agent *AgentInstance,
+	baseModelName string,
+	candidate providers.FallbackCandidate,
+) (providers.LLMProvider, string, func(), error) {
+	if agent == nil {
+		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: no agent available for /btw")
+	}
+
+	modelCfg, err := al.sideQuestionModelConfig(agent, baseModelName, candidate)
+	if err != nil {
+		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
+	}
+
+	factory := al.providerFactory
+	if factory == nil {
+		factory = providers.CreateProviderFromConfig
+	}
+	provider, modelID, err := factory(modelCfg)
+	if err != nil {
+		return nil, "", func() {}, fmt.Errorf("isolatedSideQuestionProvider: %w", err)
+	}
+
+	cleanup := func() {
+		closeProviderIfStateful(provider)
+	}
+	return provider, modelID, cleanup, nil
+}
+
+// sideQuestionModelConfig resolves the model config for side questions.
+func (al *AgentLoop) sideQuestionModelConfig(
+	agent *AgentInstance,
+	baseModelName string,
+	candidate providers.FallbackCandidate,
+) (*config.ModelConfig, error) {
+	if agent == nil {
+		return nil, fmt.Errorf("sideQuestionModelConfig: no agent available for /btw")
+	}
+
+	// If candidate has an identity key, use that
+	if name := modelNameFromIdentityKey(candidate.IdentityKey); name != "" {
+		modelCfg, err := resolvedModelConfig(al.GetConfig(), name, agent.Workspace)
+		if err == nil {
+			return modelCfg, nil
+		}
+		// Fallback: create a minimal config if lookup fails
+	}
+
+	// Otherwise, clean up the base model name and use it
+	baseModelName = strings.TrimSpace(baseModelName)
+	modelCfg, err := resolvedModelConfig(al.GetConfig(), baseModelName, agent.Workspace)
+	if err != nil {
+		// Fallback: create a minimal config for test scenarios
+		model := strings.TrimSpace(baseModelName)
+		if candidate.Model != "" {
+			model = candidate.Model
+		}
+		if candidate.Provider != "" && candidate.Model != "" {
+			model = providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
+		} else {
+			model = ensureProtocolModel(model)
+		}
+		return &config.ModelConfig{
+			ModelName: baseModelName,
+			Model:     model,
+			Workspace: agent.Workspace,
+		}, nil
+	}
+
+	// If candidate specifies a different provider/model, override
+	clone := *modelCfg
+	if candidate.Provider != "" && candidate.Model != "" {
+		clone.Model = providers.NormalizeProvider(candidate.Provider) + "/" + candidate.Model
+	}
+	return &clone, nil
+}
+
+// sideQuestionModelName determines which model name to use for side questions.
+func sideQuestionModelName(agent *AgentInstance, usedLight bool) string {
+	if usedLight && len(agent.LightCandidates) > 0 {
+		// Use the first light candidate's model
+		return agent.LightCandidates[0].Model
+	}
+	return agent.Model
+}
+
+// modelNameFromIdentityKey extracts the model name from an identity key.
+func modelNameFromIdentityKey(identityKey string) string {
+	if identityKey == "" {
+		return ""
+	}
+	parts := strings.SplitN(identityKey, "/", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return identityKey
+}
+
+// closeProviderIfStateful closes a provider if it implements StatefulProvider.
+func closeProviderIfStateful(provider providers.LLMProvider) {
+	if stateful, ok := provider.(providers.StatefulProvider); ok {
+		stateful.Close()
+	}
+}
+
+// makePendingTurnID generates a unique turn ID for placeholder turns.
+// Format: "pending-{sessionKey}-{sequence}"
+func makePendingTurnID(sessionKey string, seq uint64) string {
+	return pendingTurnPrefix + sessionKey + "-" + fmt.Sprintf("%d", seq)
 }
 
 func commandsUnavailableSkillMessage() string {
@@ -3355,39 +4347,6 @@ func mapCommandError(result commands.ExecuteResult) string {
 		return fmt.Sprintf("Failed to execute command: %v", result.Err)
 	}
 	return fmt.Sprintf("Failed to execute /%s: %v", result.Command, result.Err)
-}
-
-// extractPeer extracts the routing peer from the inbound message's structured Peer field.
-func extractPeer(msg bus.InboundMessage) *routing.RoutePeer {
-	if msg.Peer.Kind == "" {
-		return nil
-	}
-	peerID := msg.Peer.ID
-	if peerID == "" {
-		if msg.Peer.Kind == "direct" {
-			peerID = msg.SenderID
-		} else {
-			peerID = msg.ChatID
-		}
-	}
-	return &routing.RoutePeer{Kind: msg.Peer.Kind, ID: peerID}
-}
-
-func inboundMetadata(msg bus.InboundMessage, key string) string {
-	if msg.Metadata == nil {
-		return ""
-	}
-	return msg.Metadata[key]
-}
-
-// extractParentPeer extracts the parent peer (reply-to) from inbound message metadata.
-func extractParentPeer(msg bus.InboundMessage) *routing.RoutePeer {
-	parentKind := inboundMetadata(msg, metadataKeyParentPeerKind)
-	parentID := inboundMetadata(msg, metadataKeyParentPeerID)
-	if parentKind == "" || parentID == "" {
-		return nil
-	}
-	return &routing.RoutePeer{Kind: parentKind, ID: parentID}
 }
 
 // isNativeSearchProvider reports whether the given LLM provider implements

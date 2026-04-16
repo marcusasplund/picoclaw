@@ -37,7 +37,7 @@ type sendRequest struct {
 
 type SMSChannel struct {
 	*channels.BaseChannel
-	config     config.SMSConfig
+	config     *config.SMSConfig
 	httpClient *http.Client
 	ctx        context.Context
 	cancel     context.CancelFunc
@@ -45,7 +45,10 @@ type SMSChannel struct {
 
 var _ channels.Channel = (*SMSChannel)(nil)
 
-func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChannel, error) {
+func NewSMSChannel(bc *config.Channel, cfg *config.SMSConfig, messageBus *bus.MessageBus) (*SMSChannel, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("sms config is required")
+	}
 	if cfg.GatewayURL == "" {
 		return nil, fmt.Errorf("sms gateway_url is required")
 	}
@@ -57,11 +60,11 @@ func NewSMSChannel(cfg config.SMSConfig, messageBus *bus.MessageBus) (*SMSChanne
 
 	base := channels.NewBaseChannel(
 		"sms",
-		cfg,
+		bc,
 		messageBus,
-		cfg.AllowFrom,
+		bc.AllowFrom,
 		channels.WithMaxMessageLength(480),
-		channels.WithReasoningChannelID(cfg.ReasoningChannelID),
+		channels.WithReasoningChannelID(bc.ReasoningChannelID),
 	)
 
 	ch := &SMSChannel{

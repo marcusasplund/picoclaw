@@ -122,6 +122,7 @@ This design also enables **multi-agent support** with flexible provider selectio
 | `max_tokens_field` | string | No | Override the max tokens field name in request body (e.g., `max_completion_tokens` for o1 models) |
 | `thinking_level` | string | No | Extended thinking level: `off`, `low`, `medium`, `high`, `xhigh`, or `adaptive` |
 | `extra_body` | object | No | Additional fields to inject into every request body |
+| `custom_headers` | object | No | Additional HTTP headers to inject into every request (e.g., `{"X-Source":"coding-plan"}`). If a key matches a built-in header, the custom value overrides the built-in one (e.g., `Authorization`, `User-Agent`, `Content-Type`, `Accept`). |
 | `rpm` | int | No | Per-minute request rate limit |
 | `fallbacks` | string[] | No | Fallback model names for automatic failover |
 | `enabled` | bool | No | Whether this model entry is active (default: `true`) |
@@ -389,7 +390,7 @@ The old `providers` configuration is **deprecated** and has been removed in V2. 
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "model_list": [
     {
       "model_name": "glm-4.7",
@@ -479,19 +480,22 @@ picoclaw agent -m "Hello"
     "model_name": "voice-gemini",
     "echo_transcription": false
   },
-  "channels": {
+  "channel_list": {
     "telegram": {
       "enabled": true,
+      "type": "telegram",
       "token": "123456:ABC...",
       "allow_from": ["123456789"]
     },
     "discord": {
       "enabled": true,
+      "type": "discord",
       "token": "",
       "allow_from": [""]
     },
     "whatsapp": {
       "enabled": false,
+      "type": "whatsapp",
       "bridge_url": "ws://localhost:3001",
       "use_native": false,
       "session_store_path": "",
@@ -499,6 +503,7 @@ picoclaw agent -m "Hello"
     },
     "feishu": {
       "enabled": false,
+      "type": "feishu",
       "app_id": "cli_xxx",
       "app_secret": "xxx",
       "encrypt_key": "",
@@ -507,6 +512,7 @@ picoclaw agent -m "Hello"
     },
     "qq": {
       "enabled": false,
+      "type": "qq",
       "app_id": "",
       "app_secret": "",
       "allow_from": []

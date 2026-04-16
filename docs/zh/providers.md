@@ -118,6 +118,7 @@
 | `max_tokens_field` | string | 否 | 覆盖请求体中 max tokens 的字段名（如 o1 模型使用 `max_completion_tokens`） |
 | `thinking_level` | string | 否 | 扩展思考级别：`off`、`low`、`medium`、`high`、`xhigh` 或 `adaptive` |
 | `extra_body` | object | 否 | 注入到每个请求体中的额外字段 |
+| `custom_headers` | object | 否 | 注入到每个请求中的额外 HTTP 请求头（例如 `{"X-Source":"coding-plan"}`）。若键名与内置请求头同名，会覆盖内置值（如 `Authorization`、`User-Agent`、`Content-Type`、`Accept`）。 |
 | `rpm` | int | 否 | 每分钟请求速率限制 |
 | `fallbacks` | string[] | 否 | 自动故障转移的备用模型名称 |
 | `enabled` | bool | 否 | 是否启用此模型条目（默认：`true`） |
@@ -359,7 +360,7 @@ PicoClaw 在发送请求前仅去除外层 `litellm/` 前缀，因此 `litellm/l
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "model_list": [
     {
       "model_name": "glm-4.7",
@@ -449,19 +450,22 @@ picoclaw agent -m "你好"
     "model_name": "voice-gemini",
     "echo_transcription": false
   },
-  "channels": {
+  "channel_list": {
     "telegram": {
       "enabled": true,
+      "type": "telegram",
       "token": "123456:ABC...",
       "allow_from": ["123456789"]
     },
     "discord": {
       "enabled": true,
+      "type": "discord",
       "token": "",
       "allow_from": [""]
     },
     "whatsapp": {
       "enabled": false,
+      "type": "whatsapp",
       "bridge_url": "ws://localhost:3001",
       "use_native": false,
       "session_store_path": "",
@@ -469,6 +473,7 @@ picoclaw agent -m "你好"
     },
     "feishu": {
       "enabled": false,
+      "type": "feishu",
       "app_id": "cli_xxx",
       "app_secret": "xxx",
       "encrypt_key": "",
@@ -477,6 +482,7 @@ picoclaw agent -m "你好"
     },
     "qq": {
       "enabled": false,
+      "type": "qq",
       "app_id": "",
       "app_secret": "",
       "allow_from": []

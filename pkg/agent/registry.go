@@ -3,7 +3,7 @@ package agent
 import (
 	"sync"
 
-    "github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -13,22 +13,22 @@ import (
 
 // AgentRegistry manages multiple agent instances and routes messages to them.
 type AgentRegistry struct {
-	agents   map[string]*AgentInstance
-	resolver *routing.RouteResolver
-	mu       sync.RWMutex
-    messageBus *bus.MessageBus
+	agents     map[string]*AgentInstance
+	resolver   *routing.RouteResolver
+	mu         sync.RWMutex
+	messageBus *bus.MessageBus
 }
 
 // NewAgentRegistry creates a registry from config, instantiating all agents.
 func NewAgentRegistry(
 	cfg *config.Config,
 	provider providers.LLMProvider,
-    messageBus *bus.MessageBus,
+	messageBus *bus.MessageBus,
 ) *AgentRegistry {
 	registry := &AgentRegistry{
-		agents:   make(map[string]*AgentInstance),
-		resolver: routing.NewRouteResolver(cfg),
-                messageBus: messageBus,
+		agents:     make(map[string]*AgentInstance),
+		resolver:   routing.NewRouteResolver(cfg),
+		messageBus: messageBus,
 	}
 
 	agentConfigs := cfg.Agents.List
@@ -37,7 +37,7 @@ func NewAgentRegistry(
 			ID:      "main",
 			Default: true,
 		}
-        instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, messageBus)
+		instance := NewAgentInstance(implicitAgent, &cfg.Agents.Defaults, cfg, provider, messageBus)
 		registry.agents["main"] = instance
 		logger.InfoCF("agent", "Created implicit main agent (no agents.list configured)", nil)
 	} else {
@@ -68,9 +68,9 @@ func (r *AgentRegistry) GetAgent(agentID string) (*AgentInstance, bool) {
 	return agent, ok
 }
 
-// ResolveRoute determines which agent handles the message.
-func (r *AgentRegistry) ResolveRoute(input routing.RouteInput) routing.ResolvedRoute {
-	return r.resolver.ResolveRoute(input)
+// ResolveRoute determines which agent handles the normalized inbound context.
+func (r *AgentRegistry) ResolveRoute(inbound bus.InboundContext) routing.ResolvedRoute {
+	return r.resolver.ResolveRoute(inbound)
 }
 
 // ListAgentIDs returns all registered agent IDs.

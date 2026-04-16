@@ -7,10 +7,16 @@ import (
 )
 
 func init() {
-	channels.RegisterFactory("sms", func(cfg *config.Config, b *bus.MessageBus) (channels.Channel, error) {
-		if !cfg.Channels.SMS.Enabled {
-			return nil, nil
+	channels.RegisterFactory(config.ChannelSMS, func(channelName, channelType string, cfg *config.Config, b *bus.MessageBus) (channels.Channel, error) {
+		bc := cfg.Channels[channelName]
+		decoded, err := bc.GetDecoded()
+		if err != nil {
+			return nil, err
 		}
-		return NewSMSChannel(cfg.Channels.SMS, b)
+		c, ok := decoded.(*config.SMSConfig)
+		if !ok {
+			return nil, channels.ErrSendFailed
+		}
+		return NewSMSChannel(bc, c, b)
 	})
 }
