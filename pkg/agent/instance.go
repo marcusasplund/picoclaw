@@ -65,8 +65,13 @@ func NewAgentInstance(
 	defaults *config.AgentDefaults,
 	cfg *config.Config,
 	provider providers.LLMProvider,
-	messageBus *bus.MessageBus,
+	messageBuses ...*bus.MessageBus,
 ) *AgentInstance {
+	var messageBus *bus.MessageBus
+	if len(messageBuses) > 0 {
+		messageBus = messageBuses[0]
+	}
+
 	if cfg != nil {
 		// Keep the subprocess isolation runtime aligned with the latest loaded config
 		// before any tools or providers start spawning child processes.
