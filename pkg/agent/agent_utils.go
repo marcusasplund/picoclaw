@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 	"time"
@@ -478,17 +479,28 @@ func sideQuestionResponseContent(response *providers.LLMResponse) string {
 	if response == nil {
 		return ""
 	}
-	if response.Content != "" {
+	if strings.TrimSpace(response.Content) != "" {
 		return response.Content
 	}
-	return response.ReasoningContent
+	return responseReasoningContent(response)
+}
+
+func responseReasoningContent(response *providers.LLMResponse) string {
+	if response == nil {
+		return ""
+	}
+	if strings.TrimSpace(response.Reasoning) != "" {
+		return response.Reasoning
+	}
+	if strings.TrimSpace(response.ReasoningContent) != "" {
+		return response.ReasoningContent
+	}
+	return ""
 }
 
 func shallowCloneLLMOptions(opts map[string]any) map[string]any {
 	clone := make(map[string]any, len(opts))
-	for k, v := range opts {
-		clone[k] = v
-	}
+	maps.Copy(clone, opts)
 	return clone
 }
 

@@ -382,10 +382,7 @@ func (p *Pipeline) CallLLM(
 		}
 	}
 
-	reasoningContent := exec.response.Reasoning
-	if reasoningContent == "" {
-		reasoningContent = exec.response.ReasoningContent
-	}
+	reasoningContent := responseReasoningContent(exec.response)
 	if ts.channel == "pico" {
 		go al.publishPicoReasoning(turnCtx, reasoningContent, ts.chatID)
 	} else {
@@ -494,7 +491,7 @@ func (p *Pipeline) CallLLM(
 	assistantMsg := providers.Message{
 		Role:             "assistant",
 		Content:          exec.response.Content,
-		ReasoningContent: exec.response.ReasoningContent,
+		ReasoningContent: reasoningContent,
 	}
 	for _, tc := range exec.normalizedToolCalls {
 		argumentsJSON, _ := json.Marshal(tc.Arguments)
