@@ -49,6 +49,7 @@ type webSearchProviderConfig struct {
 	BaseURL    string   `json:"base_url,omitempty"`
 	APIKey     string   `json:"api_key,omitempty"`
 	APIKeys    []string `json:"api_keys,omitempty"`
+	Model      string   `json:"model,omitempty"`
 	APIKeySet  bool     `json:"api_key_set,omitempty"`
 }
 
@@ -172,6 +173,12 @@ var toolCatalog = []toolCatalogEntry{
 		ConfigKey:   "spi",
 	},
 	{
+		Name:        "serial",
+		Description: "Interact with serial ports exposed on the host.",
+		Category:    "hardware",
+		ConfigKey:   "serial",
+	},
+	{
 		Name:        "tool_search_tool_regex",
 		Description: "Discover hidden MCP tools by regex search when tool discovery is enabled.",
 		Category:    "discovery",
@@ -265,6 +272,8 @@ func buildToolSupport(cfg *config.Config) []toolSupportItem {
 			status, reasonCode = resolveWebSearchToolSupport(cfg)
 		case "i2c", "spi":
 			status, reasonCode = resolveHardwareToolSupport(cfg.Tools.IsToolEnabled(entry.ConfigKey))
+		case "serial":
+			status, reasonCode = resolveSerialToolSupport(cfg.Tools.IsToolEnabled(entry.ConfigKey))
 		default:
 			if cfg.Tools.IsToolEnabled(entry.ConfigKey) {
 				status = "enabled"
@@ -291,6 +300,18 @@ func resolveHardwareToolSupport(enabled bool) (string, string) {
 		return "blocked", "requires_linux"
 	}
 	return "enabled", ""
+}
+
+func resolveSerialToolSupport(enabled bool) (string, string) {
+	if !enabled {
+		return "disabled", ""
+	}
+	switch runtime.GOOS {
+	case "linux", "darwin", "windows":
+		return "enabled", ""
+	default:
+		return "blocked", "requires_serial_platform"
+	}
 }
 
 func resolveDiscoveryToolSupport(cfg *config.Config, methodEnabled bool) (string, string) {
@@ -362,6 +383,8 @@ func applyToolState(cfg *config.Config, toolName string, enabled bool) error {
 		cfg.Tools.I2C.Enabled = enabled
 	case "spi":
 		cfg.Tools.SPI.Enabled = enabled
+	case "serial":
+		cfg.Tools.Serial.Enabled = enabled
 	case "tool_search_tool_regex":
 		cfg.Tools.MCP.Discovery.UseRegex = enabled
 		if enabled {
@@ -424,6 +447,14 @@ func (h *Handler) handleUpdateWebSearchConfig(w http.ResponseWriter, r *http.Req
 		cfg.Tools.Web.DuckDuckGo.Enabled = settings.Enabled
 		cfg.Tools.Web.DuckDuckGo.MaxResults = settings.MaxResults
 	}
+	if settings, ok := req.Settings["gemini"]; ok {
+		cfg.Tools.Web.Gemini.Enabled = settings.Enabled
+		cfg.Tools.Web.Gemini.MaxResults = settings.MaxResults
+		cfg.Tools.Web.Gemini.Model = strings.TrimSpace(settings.Model)
+		if key := strings.TrimSpace(settings.APIKey); key != "" {
+			cfg.Tools.Web.Gemini.APIKey = *config.NewSecureString(key)
+		}
+	}
 	if settings, ok := req.Settings["brave"]; ok {
 		cfg.Tools.Web.Brave.Enabled = settings.Enabled
 		cfg.Tools.Web.Brave.MaxResults = settings.MaxResults
@@ -483,7 +514,7 @@ func normalizeWebSearchProvider(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", "auto":
 		return "auto"
-	case "sogou", "brave", "tavily", "duckduckgo", "perplexity", "searxng", "glm_search", "baidu_search":
+	case "sogou", "brave", "tavily", "duckduckgo", "gemini", "perplexity", "searxng", "glm_search", "baidu_search":
 		return strings.ToLower(strings.TrimSpace(provider))
 	default:
 		return ""
@@ -526,6 +557,12 @@ func buildWebSearchConfigResponse(cfg *config.Config) webSearchConfigResponse {
 		"duckduckgo": {
 			Enabled:    cfg.Tools.Web.DuckDuckGo.Enabled,
 			MaxResults: cfg.Tools.Web.DuckDuckGo.MaxResults,
+		},
+		"gemini": {
+			Enabled:    cfg.Tools.Web.Gemini.Enabled,
+			MaxResults: cfg.Tools.Web.Gemini.MaxResults,
+			Model:      cfg.Tools.Web.Gemini.Model,
+			APIKeySet:  cfg.Tools.Web.Gemini.APIKey.String() != "",
 		},
 		"brave": {
 			Enabled:    cfg.Tools.Web.Brave.Enabled,
@@ -581,6 +618,13 @@ func buildWebSearchConfigResponse(cfg *config.Config) webSearchConfigResponse {
 			Label:      "DuckDuckGo",
 			Configured: picotools.WebSearchProviderReady(opts, "duckduckgo"),
 			Current:    current == "duckduckgo",
+		},
+		{
+			ID:           "gemini",
+			Label:        "Gemini (Google Search)",
+			Configured:   picotools.WebSearchProviderReady(opts, "gemini"),
+			Current:      current == "gemini",
+			RequiresAuth: true,
 		},
 		{
 			ID:           "brave",

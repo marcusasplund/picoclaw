@@ -56,6 +56,14 @@
 
 ## 📢 新闻
 
+2026-05-11 🛒 **LicheeRV-Claw 已上架淘宝！** 现在可以在 [淘宝](https://item.taobao.com/item.htm?abbucket=20&id=764939520376) 购买 LicheeRV-Claw，更方便地在小型 RISC-V 硬件上体验 PicoClaw。
+
+<p align="center">
+  <a href="https://item.taobao.com/item.htm?abbucket=20&id=764939520376">
+    <img src="../../assets/licheerv-claw.jpg" alt="LicheeRV-Claw on Taobao" width="520">
+  </a>
+</p>
+
 2026-03-31 📱 **Android 支持！** PicoClaw 现可在 Android 上运行！APK 下载地址：[picoclaw.io](https://picoclaw.io/download)
 
 2026-03-25 🚀 **v0.2.4 发布！** Agent 架构全面重构（SubTurn、Hook、Steering、EventBus）、微信/企业微信深度集成、安全体系升级（.security.yml、敏感数据过滤）、新增 Provider（AWS Bedrock、Azure、小米 MiMo），以及 35 项 Bug 修复。PicoClaw 已达 **26K ⭐**！
@@ -144,9 +152,9 @@ _*近期版本因快速合并 PR 可能占用 10–20MB，资源优化已列入�
 
 PicoClaw 几乎可以部署在任何 Linux 设备上！
 
-- $9.9 [LicheeRV-Nano](https://www.aliexpress.com/item/1005006519668532.html) E(网口) 或 W(WiFi6) 版本，用于极简家庭助手
-- $30~50 [NanoKVM](https://www.aliexpress.com/item/1005007369816019.html)，或 $100 [NanoKVM-Pro](https://www.aliexpress.com/item/1005010048471263.html)，用于自动化服务器运维
-- $50 [MaixCAM](https://www.aliexpress.com/item/1005008053333693.html) 或 $100 [MaixCAM2](https://www.kickstarter.com/projects/zepan/maixcam2-build-your-next-gen-4k-ai-camera)，用于智能监控
+- $9.9 [LicheeRV-Nano](https://item.taobao.com/item.htm?id=764939520376) E(网口) 或 W(WiFi6) 版本，用于极简家庭助手
+- $30~50 [NanoKVM](https://item.taobao.com/item.htm?id=811206560480)，或 $100 [NanoKVM-Pro](https://item.taobao.com/item.htm?id=994419942411)，用于自动化服务器运维
+- $50 [MaixCAM](https://item.taobao.com/item.htm?id=784724795837) 或 $100 [MaixCAM2](https://item.taobao.com/item.htm?id=1050380368975)，用于智能监控
 
 <https://private-user-images.githubusercontent.com/83055338/547056448-e7b031ff-d6f5-4468-bcca-5726b6fecb5c.mp4>
 
@@ -289,24 +297,6 @@ macOS 可能会在首次启动时拦截 `picoclaw-launcher`，因为它从互联
 
 </details>
 
-### 💻 TUI Launcher（推荐无头环境 / SSH）
-
-TUI（终端 UI）Launcher 提供功能完整的终端配置与管理界面，适合服务器、树莓派等无显示器环境。
-
-```bash
-picoclaw-launcher-tui
-```
-
-<p align="center">
-<img src="../../assets/launcher-tui.jpg" alt="TUI Launcher" width="600">
-</p>
-
-**开始使用：**
-
-通过 TUI 菜单：**1)** 配置 Provider -> **2)** 配置 Channel -> **3)** 启动 Gateway -> **4)** 开始聊天！
-
-详细 TUI 文档请参阅 [docs.picoclaw.io](https://docs.picoclaw.io)。
-
 <a id="-run-on-old-android-phones"></a>
 ### 📱 Android
 
@@ -361,6 +351,7 @@ picoclaw onboard
 
 ```json
 {
+  "version": 3,
   "agents": {
     "defaults": {
       "model_name": "gpt-5.4"
@@ -370,7 +361,7 @@ picoclaw onboard
     {
       "model_name": "gpt-5.4",
       "model": "openai/gpt-5.4",
-      "api_key": "sk-your-api-key"
+      "api_keys": ["sk-your-api-key"]
     }
   ]
 }
@@ -493,7 +484,7 @@ PicoClaw 可以搜索网络以提供最新信息。在 `tools.web` 中配置：
 
 | 搜索引擎 | API Key | 免费额度 | 链接 |
 |---------|---------|---------|------|
-| [百度搜索](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | 必填 | 1000 次/天 | AI 搜索，国内首选 |
+| [百度搜索](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | 必填 | 1500 次/月（按天发放） | AI 搜索，国内首选 |
 | [Tavily](https://tavily.com) | 必填 | 1000 次/月 | 专为 AI Agent 优化 |
 | [GLM Search](https://open.bigmodel.cn/) | 必填 | 视情况 | 智谱网络搜索 |
 | DuckDuckGo | 无需 | 无限制 | 内置备用（国内访问困难） |

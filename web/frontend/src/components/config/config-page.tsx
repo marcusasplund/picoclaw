@@ -15,12 +15,15 @@ import {
   setAutoStartEnabled as updateAutoStartEnabled,
   setLauncherConfig as updateLauncherConfig,
 } from "@/api/system"
+import { ConfigChangeNotice } from "@/components/config-change-notice"
 import {
   AgentDefaultsSection,
   CronSection,
   DevicesSection,
+  EvolutionSection,
   ExecSection,
   LauncherSection,
+  MCPSection,
   RuntimeSection,
 } from "@/components/config/config-sections"
 import {
@@ -28,15 +31,34 @@ import {
   EMPTY_FORM,
   EMPTY_LAUNCHER_FORM,
   type LauncherForm,
+  type MCPServerForm,
   buildFormFromConfig,
   parseCIDRText,
+  parseFloatField,
   parseIntField,
+  parseJSONObjectField,
   parseMultilineList,
 } from "@/components/config/form-model"
 import { PageHeader } from "@/components/page-header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { showSaveSuccessOrRestartToast } from "@/lib/restart-required"
 import { refreshGatewayState } from "@/store/gateway"
+
+function buildStringMapMergePatch(
+  next: Record<string, string>,
+  previous: Record<string, string>,
+): Record<string, string | null> {
+  const patch: Record<string, string | null> = { ...next }
+
+  for (const key of Object.keys(previous)) {
+    if (!(key in next)) {
+      patch[key] = null
+    }
+  }
+
+  return patch
+}
 
 export function ConfigPage() {
   const { t } = useTranslation()
@@ -141,6 +163,44 @@ export function ConfigPage() {
     setLauncherForm((prev) => ({ ...prev, [key]: value }))
   }
 
+  const handleMCPServerAdd = () => {
+    const nextIndex = form.mcpServers.length + 1
+    const server: MCPServerForm = {
+      id: `mcp-${Date.now()}-${nextIndex}`,
+      name: "",
+      enabled: true,
+      deferredOverride: null,
+      type: "stdio",
+      url: "",
+      command: "",
+      argsText: "",
+      envText: "{}",
+      envFile: "",
+      headersText: "{}",
+    }
+    updateField("mcpServers", [...form.mcpServers, server])
+  }
+
+  const handleMCPServerRemove = (id: string) => {
+    updateField(
+      "mcpServers",
+      form.mcpServers.filter((server) => server.id !== id),
+    )
+  }
+
+  const handleMCPServerFieldChange = <K extends keyof MCPServerForm>(
+    id: string,
+    key: K,
+    value: MCPServerForm[K],
+  ) => {
+    updateField(
+      "mcpServers",
+      form.mcpServers.map((server) =>
+        server.id === id ? { ...server, [key]: value } : server,
+      ),
+    )
+  }
+
   const handleReset = () => {
     setForm(baseline)
     setLauncherForm(launcherBaseline)
@@ -174,6 +234,17 @@ export function ConfigPage() {
         }
         if (!dmScope) {
           throw new Error("Session scope is required.")
+        }
+
+        if (
+          form.mcpEnabled &&
+          form.mcpDiscoveryEnabled &&
+          !form.mcpDiscoveryUseBM25 &&
+          !form.mcpDiscoveryUseRegex
+        ) {
+          throw new Error(
+            "MCP discovery requires at least one search method (BM25 or regex).",
+          )
         }
 
         const maxTokens = parseIntField(form.maxTokens, "Max tokens", {
@@ -212,8 +283,193 @@ export function ConfigPage() {
           "Cron exec timeout",
           { min: 0 },
         )
+        const evolutionMinTaskCount = parseIntField(
+          form.evolutionMinTaskCount,
+          "Evolution minimum task count",
+          { min: 1 },
+        )
+        const evolutionMinSuccessRatio = parseFloatField(
+          form.evolutionMinSuccessRatio,
+          "Evolution minimum success ratio",
+          { min: 0.01, max: 1 },
+        )
+        const mcpDiscoveryValidationEnabled =
+          form.mcpEnabled && form.mcpDiscoveryEnabled
+        const mcpDiscoveryPatch: Record<string, unknown> = {
+          enabled: form.mcpDiscoveryEnabled,
+          use_bm25: form.mcpDiscoveryUseBM25,
+          use_regex: form.mcpDiscoveryUseRegex,
+        }
+
+        if (mcpDiscoveryValidationEnabled) {
+          mcpDiscoveryPatch.ttl = parseIntField(
+            form.mcpDiscoveryTTL,
+            "MCP discovery ttl",
+            {
+              min: 1,
+            },
+          )
+          mcpDiscoveryPatch.max_search_results = parseIntField(
+            form.mcpDiscoveryMaxSearchResults,
+            "MCP discovery max search results",
+            { min: 1 },
+          )
+        }
         const execConfigPatch: Record<string, unknown> = {
           enabled: form.execEnabled,
+        }
+
+        let mcpServersPatch: Record<string, Record<string, unknown> | null> = {}
+        if (form.mcpEnabled) {
+          const baselineServerNames = new Set(
+            baseline.mcpServers
+              .map((server) => server.name.trim())
+              .filter((name) => name !== ""),
+          )
+
+          const normalizedServers = form.mcpServers
+            .map((server) => ({
+              ...server,
+              name: server.name.trim(),
+              url: server.url.trim(),
+              command: server.command.trim(),
+              envFile: server.envFile.trim(),
+            }))
+            .filter((server) => server.name !== "")
+
+          const serverNameCounts = new Map<string, number>()
+          for (const server of normalizedServers) {
+            serverNameCounts.set(
+              server.name,
+              (serverNameCounts.get(server.name) ?? 0) + 1,
+            )
+          }
+
+          const duplicateNames = Array.from(serverNameCounts.entries())
+            .filter(([, count]) => count > 1)
+            .map(([name]) => name)
+            .sort((a, b) => a.localeCompare(b))
+
+          if (duplicateNames.length > 0) {
+            throw new Error(
+              `MCP server names must be unique. Duplicates: ${duplicateNames.join(", ")}.`,
+            )
+          }
+
+          const currentServerNames = new Set(
+            normalizedServers.map((server) => server.name),
+          )
+
+          const removedServerEntries = Array.from(baselineServerNames)
+            .filter((name) => !currentServerNames.has(name))
+            .map((name) => [name, null] as const)
+
+          const baselineServersByName = new Map(
+            baseline.mcpServers
+              .map((server) => ({
+                ...server,
+                name: server.name.trim(),
+              }))
+              .filter((server) => server.name !== "")
+              .map((server) => [server.name, server] as const),
+          )
+
+          const upsertServerEntries = normalizedServers.map((server) => {
+            const deferredPatch = { deferred: server.deferredOverride }
+            const baselineServer = baselineServersByName.get(server.name)
+            const shouldValidateServer = server.enabled
+
+            if (server.type !== "stdio") {
+              if (shouldValidateServer && server.url === "") {
+                throw new Error(`MCP server ${server.name} requires a URL.`)
+              }
+
+              if (shouldValidateServer) {
+                try {
+                  const parsedURL = new URL(server.url)
+                  if (
+                    parsedURL.protocol !== "http:" &&
+                    parsedURL.protocol !== "https:"
+                  ) {
+                    throw new Error("invalid protocol")
+                  }
+                } catch {
+                  throw new Error(
+                    `MCP server ${server.name} requires a valid HTTP(S) URL.`,
+                  )
+                }
+              }
+
+              const baselineHeaders = baselineServer
+                ? parseJSONObjectField(
+                    baselineServer.headersText,
+                    `Saved MCP server ${server.name} headers`,
+                  )
+                : {}
+
+              return [
+                server.name,
+                {
+                  ...deferredPatch,
+                  enabled: server.enabled,
+                  type: server.type,
+                  url: server.url,
+                  headers: buildStringMapMergePatch(
+                    shouldValidateServer
+                      ? parseJSONObjectField(
+                          server.headersText,
+                          `MCP server ${server.name} headers`,
+                        )
+                      : baselineHeaders,
+                    baselineHeaders,
+                  ),
+                  command: null,
+                  args: null,
+                  env: null,
+                  env_file: null,
+                },
+              ] as const
+            }
+
+            if (shouldValidateServer && server.command === "") {
+              throw new Error(`MCP server ${server.name} requires a command.`)
+            }
+
+            const baselineEnv = baselineServer
+              ? parseJSONObjectField(
+                  baselineServer.envText,
+                  `Saved MCP server ${server.name} env`,
+                )
+              : {}
+
+            return [
+              server.name,
+              {
+                ...deferredPatch,
+                enabled: server.enabled,
+                type: "stdio",
+                command: server.command,
+                args: parseMultilineList(server.argsText),
+                env: buildStringMapMergePatch(
+                  shouldValidateServer
+                    ? parseJSONObjectField(
+                        server.envText,
+                        `MCP server ${server.name} env`,
+                      )
+                    : baselineEnv,
+                  baselineEnv,
+                ),
+                env_file: server.envFile === "" ? null : server.envFile,
+                url: null,
+                headers: null,
+              },
+            ] as const
+          })
+
+          mcpServersPatch = Object.fromEntries([
+            ...upsertServerEntries,
+            ...removedServerEntries,
+          ])
         }
 
         if (form.execEnabled) {
@@ -256,12 +512,31 @@ export function ConfigPage() {
           session: {
             dm_scope: dmScope,
           },
+          evolution: {
+            enabled: form.evolutionEnabled,
+            mode: form.evolutionMode,
+            state_dir:
+              form.evolutionStateDir.trim() === ""
+                ? null
+                : form.evolutionStateDir.trim(),
+            min_task_count: evolutionMinTaskCount,
+            min_success_ratio: evolutionMinSuccessRatio,
+            cold_path_trigger: form.evolutionColdPathTrigger,
+            cold_path_times: parseMultilineList(
+              form.evolutionColdPathTimesText,
+            ),
+          },
           tools: {
             cron: {
               allow_command: form.allowCommand,
               exec_timeout_minutes: cronExecTimeoutMinutes,
             },
             exec: execConfigPatch,
+            mcp: {
+              enabled: form.mcpEnabled,
+              discovery: mcpDiscoveryPatch,
+              servers: mcpServersPatch,
+            },
           },
           heartbeat: {
             enabled: form.heartbeatEnabled,
@@ -334,8 +609,13 @@ export function ConfigPage() {
         queryClient.setQueryData(["system", "autostart"], status)
       }
 
-      toast.success(t("pages.config.save_success"))
-      void refreshGatewayState({ force: true })
+      const gateway = await refreshGatewayState({ force: true })
+      showSaveSuccessOrRestartToast(
+        t,
+        t("pages.config.save_success"),
+        t("navigation.config"),
+        gateway?.restartRequired === true,
+      )
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("pages.config.save_error"),
@@ -407,6 +687,16 @@ export function ConfigPage() {
 
               <RuntimeSection form={form} onFieldChange={updateField} />
 
+              <EvolutionSection form={form} onFieldChange={updateField} />
+
+              <MCPSection
+                form={form}
+                onFieldChange={updateField}
+                onAddServer={handleMCPServerAdd}
+                onRemoveServer={handleMCPServerRemove}
+                onServerFieldChange={handleMCPServerFieldChange}
+              />
+
               <ExecSection form={form} onFieldChange={updateField} />
 
               <CronSection form={form} onFieldChange={updateField} />
@@ -433,8 +723,12 @@ export function ConfigPage() {
       {isDirty && (
         <div className="border-border/70 bg-background/95 supports-backdrop-filter:bg-background/80 shrink-0 border-t px-3 py-3 shadow-[0_-12px_30px_rgba(15,23,42,0.10)] backdrop-blur lg:px-6">
           <div className="mx-auto flex w-full max-w-[1000px] flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-muted-foreground/70 text-xs">
-              {t("pages.config.unsaved_changes")}
+            <div className="flex-1">
+              <ConfigChangeNotice
+                kind="save"
+                title={t("common.saveChangesTitle")}
+                description={t("pages.config.unsaved_changes")}
+              />
             </div>
             {actionButtons}
           </div>

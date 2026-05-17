@@ -23,6 +23,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/identity"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
 // picoConn represents a single WebSocket connection.
@@ -57,8 +58,17 @@ func outboundMessageIsToolFeedback(msg bus.OutboundMessage) bool {
 	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), "tool_feedback")
 }
 
+func outboundMessageIsToolCalls(msg bus.OutboundMessage) bool {
+	if len(msg.Context.Raw) == 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(msg.Context.Raw["message_kind"]), MessageKindToolCalls)
+}
+
 func outboundMessageFinalizesTrackedToolFeedback(msg bus.OutboundMessage) bool {
-	return !outboundMessageIsToolFeedback(msg) && !outboundMessageIsThought(msg)
+	return !outboundMessageIsToolFeedback(msg) &&
+		!outboundMessageIsThought(msg) &&
+		!outboundMessageIsToolCalls(msg)
 }
 
 // writeJSON sends a JSON message to the connection with write locking.
@@ -289,6 +299,7 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 	}
 	isThought := outboundMessageIsThought(msg)
 	isToolFeedback := outboundMessageIsToolFeedback(msg)
+	isToolCalls := outboundMessageIsToolCalls(msg)
 	if isToolFeedback {
 		if msgID, handled, err := c.progress.Update(ctx, msg.ChatID, msg.Content); handled {
 			if err != nil {
@@ -312,8 +323,22 @@ func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]stri
 
 	payload := map[string]any{
 		PayloadKeyContent: content,
-		PayloadKeyThought: isThought,
 		"message_id":      msgID,
+	}
+	switch {
+	case isThought:
+		payload[PayloadKeyKind] = MessageKindThought
+
+		// This field is kept solely for compatibility with legacy pico clients that
+		// do not yet support the newer "kind" field.
+		// DO NOT use it for any purpose other than legacy client compatibility.
+		payload[PayloadKeyThought] = true
+
+	case isToolCalls:
+		payload[PayloadKeyKind] = MessageKindToolCalls
+		if toolCalls, ok := picoToolCallsPayload(msg); ok {
+			payload[PayloadKeyToolCalls] = toolCalls
+		}
 	}
 	setContextUsagePayload(payload, msg.ContextUsage)
 	outMsg := newMessage(TypeMessageCreate, payload)
@@ -440,7 +465,6 @@ func (c *PicoChannel) SendPlaceholder(ctx context.Context, chatID string) (strin
 	msgID := uuid.New().String()
 	outMsg := newMessage(TypeMessageCreate, map[string]any{
 		PayloadKeyContent: text,
-		PayloadKeyThought: false,
 		"message_id":      msgID,
 	})
 
@@ -966,11 +990,24 @@ func parseInlineImageMedia(payload map[string]any) ([]string, error) {
 		return nil, nil
 	}
 
-	raw, ok := payload["media"]
-	if !ok || raw == nil {
-		return nil, nil
+	media, err := parseInlineImageValues(payload["media"])
+	if err != nil {
+		return nil, err
 	}
 
+	attachments, err := parseInlineImageAttachments(payload["attachments"])
+	if err != nil {
+		return nil, err
+	}
+	media = append(media, attachments...)
+
+	return media, nil
+}
+
+func parseInlineImageValues(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	switch values := raw.(type) {
 	case []any:
 		media := make([]string, 0, len(values))
@@ -1004,6 +1041,47 @@ func parseInlineImageMedia(payload map[string]any) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("media must be a string or array of strings")
 	}
+}
+
+func parseInlineImageAttachments(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("attachments must be an array")
+	}
+
+	media := make([]string, 0, len(values))
+	for i, item := range values {
+		attachment, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("attachments[%d]: attachment must be an object", i)
+		}
+
+		attachmentType, _ := attachment["type"].(string)
+		attachmentType = strings.ToLower(strings.TrimSpace(attachmentType))
+		if attachmentType != "" && attachmentType != "image" {
+			continue
+		}
+
+		value, err := inlineImageValue(attachment)
+		if err != nil {
+			if attachmentType == "image" {
+				return nil, fmt.Errorf("attachments[%d]: %w", i, err)
+			}
+			continue
+		}
+		if !strings.HasPrefix(value, "data:") {
+			continue
+		}
+		if err := validateInlineImageDataURL(value); err != nil {
+			return nil, fmt.Errorf("attachments[%d]: %w", i, err)
+		}
+		media = append(media, value)
+	}
+	return media, nil
 }
 
 func inlineImageValue(item any) (string, error) {
@@ -1068,6 +1146,19 @@ func setContextUsagePayload(payload map[string]any, u *bus.ContextUsage) {
 		"compress_at_tokens": u.CompressAtTokens,
 		"used_percent":       u.UsedPercent,
 	}
+}
+
+func picoToolCallsPayload(msg bus.OutboundMessage) ([]utils.VisibleToolCall, bool) {
+	raw := strings.TrimSpace(msg.Context.Raw[PayloadKeyToolCalls])
+	if raw == "" {
+		return nil, false
+	}
+
+	var toolCalls []utils.VisibleToolCall
+	if err := json.Unmarshal([]byte(raw), &toolCalls); err != nil || len(toolCalls) == 0 {
+		return nil, false
+	}
+	return toolCalls, true
 }
 
 func (c *PicoChannel) editMessage(

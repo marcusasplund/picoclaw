@@ -56,6 +56,14 @@
 
 ## 📢 Tin tức
 
+2026-05-11 🛒 **LicheeRV-Claw đã có trên AliExpress!** Bạn hiện có thể mua LicheeRV-Claw trên [AliExpress](https://www.aliexpress.com/item/1005006519668532.html), giúp việc thử PicoClaw trên phần cứng RISC-V nhỏ gọn dễ dàng hơn.
+
+<p align="center">
+  <a href="https://www.aliexpress.com/item/1005006519668532.html">
+    <img src="../../assets/licheerv-claw.jpg" alt="LicheeRV-Claw on AliExpress" width="520">
+  </a>
+</p>
+
 2026-03-31 📱 **Hỗ trợ Android!** PicoClaw giờ chạy trên Android! Tải APK tại [picoclaw.io](https://picoclaw.io/download)
 
 2026-03-25 🚀 **v0.2.4 đã phát hành!** Tái cấu trúc kiến trúc Agent (SubTurn, Hooks, Steering, EventBus), tích hợp WeChat/WeCom, tăng cường bảo mật (.security.yml, lọc dữ liệu nhạy cảm), provider mới (AWS Bedrock, Azure, Xiaomi MiMo) và 35 bản vá lỗi. PicoClaw đã đạt **26K Stars**!
@@ -289,24 +297,6 @@ Sau bước này, `picoclaw-launcher` sẽ mở bình thường trong các lần
 
 </details>
 
-### 💻 TUI Launcher (Khuyến nghị cho Headless / SSH)
-
-TUI (Terminal UI) Launcher cung cấp giao diện terminal đầy đủ tính năng để cấu hình và quản lý. Lý tưởng cho máy chủ, Raspberry Pi và các môi trường headless khác.
-
-```bash
-picoclaw-launcher-tui
-```
-
-<p align="center">
-<img src="../../assets/launcher-tui.jpg" alt="TUI Launcher" width="600">
-</p>
-
-**Bắt đầu:**
-
-Sử dụng menu TUI để: **1)** Cấu hình Provider -> **2)** Cấu hình Channel -> **3)** Khởi động Gateway -> **4)** Trò chuyện!
-
-Để biết tài liệu TUI chi tiết, xem [docs.picoclaw.io](https://docs.picoclaw.io).
-
 <a id="-run-on-old-android-phones"></a>
 ### 📱 Android
 
@@ -361,6 +351,7 @@ Lệnh này tạo `~/.picoclaw/config.json` và thư mục workspace.
 
 ```json
 {
+  "version": 3,
   "agents": {
     "defaults": {
       "model_name": "gpt-5.4"
@@ -370,7 +361,7 @@ Lệnh này tạo `~/.picoclaw/config.json` và thư mục workspace.
     {
       "model_name": "gpt-5.4",
       "model": "openai/gpt-5.4",
-      "api_key": "sk-your-api-key"
+      "api_keys": ["sk-your-api-key"]
     }
   ]
 }
@@ -493,7 +484,7 @@ PicoClaw có thể tìm kiếm web để cung cấp thông tin cập nhật. C�
 | Công cụ Tìm kiếm | API Key | Gói miễn phí | Liên kết |
 |------------------|---------|--------------|----------|
 | DuckDuckGo | Không cần | Không giới hạn | Dự phòng tích hợp sẵn |
-| [Baidu Search](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | Bắt buộc | 1000 truy vấn/ngày | AI, tối ưu cho tiếng Trung |
+| [Baidu Search](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | Bắt buộc | 1500 truy vấn/tháng (phân bổ hàng ngày) | AI, tối ưu cho tiếng Trung |
 | [Tavily](https://tavily.com) | Bắt buộc | 1000 truy vấn/tháng | Tối ưu cho AI Agent |
 | [Brave Search](https://brave.com/search/api) | Bắt buộc | 2000 truy vấn/tháng | Nhanh và riêng tư |
 | [Perplexity](https://www.perplexity.ai) | Bắt buộc | Trả phí | Tìm kiếm hỗ trợ AI |

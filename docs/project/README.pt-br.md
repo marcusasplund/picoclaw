@@ -56,6 +56,14 @@
 
 ## 📢 Novidades
 
+2026-05-11 🛒 **LicheeRV-Claw no AliExpress!** Agora você pode comprar o LicheeRV-Claw no [AliExpress](https://www.aliexpress.com/item/1005006519668532.html), facilitando testar o PicoClaw em hardware RISC-V compacto.
+
+<p align="center">
+  <a href="https://www.aliexpress.com/item/1005006519668532.html">
+    <img src="../../assets/licheerv-claw.jpg" alt="LicheeRV-Claw on AliExpress" width="520">
+  </a>
+</p>
+
 2026-03-31 📱 **Suporte Android!** PicoClaw agora roda no Android! Baixe o APK em [picoclaw.io](https://picoclaw.io/download)
 
 2026-03-25 🚀 **v0.2.4 Lançada!** Reformulação da arquitetura Agent (SubTurn, Hooks, Steering, EventBus), integração WeChat/WeCom, fortalecimento de segurança (.security.yml, filtragem de dados sensíveis), novos providers (AWS Bedrock, Azure, Xiaomi MiMo) e 35 correções de bugs. O PicoClaw atingiu **26K Stars**!
@@ -289,24 +297,6 @@ Após esta etapa única, o `picoclaw-launcher` abrirá normalmente nos lançamen
 
 </details>
 
-### 💻 TUI Launcher (Recomendado para Headless / SSH)
-
-O TUI (Terminal UI) Launcher fornece uma interface de terminal completa para configuração e gerenciamento. Ideal para servidores, Raspberry Pi e outros ambientes headless.
-
-```bash
-picoclaw-launcher-tui
-```
-
-<p align="center">
-<img src="../../assets/launcher-tui.jpg" alt="TUI Launcher" width="600">
-</p>
-
-**Primeiros passos:**
-
-Use os menus do TUI para: **1)** Configurar um Provider -> **2)** Configurar um Channel -> **3)** Iniciar o Gateway -> **4)** Conversar!
-
-Para documentação detalhada do TUI, veja [docs.picoclaw.io](https://docs.picoclaw.io).
-
 <a id="-run-on-old-android-phones"></a>
 ### 📱 Android
 
@@ -361,6 +351,7 @@ Isso cria `~/.picoclaw/config.json` e o diretório workspace.
 
 ```json
 {
+  "version": 3,
   "agents": {
     "defaults": {
       "model_name": "gpt-5.4"
@@ -370,7 +361,7 @@ Isso cria `~/.picoclaw/config.json` e o diretório workspace.
     {
       "model_name": "gpt-5.4",
       "model": "openai/gpt-5.4",
-      "api_key": "sk-your-api-key"
+      "api_keys": ["sk-your-api-key"]
     }
   ]
 }
@@ -493,7 +484,7 @@ O PicoClaw pode pesquisar na web para fornecer informações atualizadas. Config
 | Motor de Busca | API Key | Nível Gratuito | Link |
 |----------------|---------|----------------|------|
 | DuckDuckGo | Não necessária | Ilimitado | Fallback integrado |
-| [Baidu Search](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | Obrigatória | 1000 consultas/dia | IA, otimizado para chinês |
+| [Baidu Search](https://cloud.baidu.com/doc/qianfan-api/s/Wmbq4z7e5) | Obrigatória | 1500 consultas/mês (alocação diária) | IA, otimizado para chinês |
 | [Tavily](https://tavily.com) | Obrigatória | 1000 consultas/mês | Otimizado para AI Agents |
 | [Brave Search](https://brave.com/search/api) | Obrigatória | 2000 consultas/mês | Rápido e privado |
 | [Perplexity](https://www.perplexity.ai) | Obrigatória | Pago | Busca com IA |
