@@ -160,6 +160,130 @@ func TestAgentConfig_FullParse(t *testing.T) {
 	}
 }
 
+func TestTurnProfileConfig_ParseAndResolve(t *testing.T) {
+	jsonData := `{
+		"agents": {
+			"defaults": {
+				"turn_profile": {
+					"enabled": true,
+					"history": {"mode": "off"},
+					"system_prompt": {"mode": "off"},
+					"skills": {"mode": "off"},
+					"tools": {
+						"mode": "custom",
+						"allow": ["web_search", "web_fetch"]
+					}
+				}
+			}
+		}
+	}`
+
+	cfg := DefaultConfig()
+	if err := json.Unmarshal([]byte(jsonData), cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := cfg.ValidateTurnProfile(); err != nil {
+		t.Fatalf("ValidateTurnProfile() error = %v", err)
+	}
+
+	profile, ok, err := cfg.Agents.Defaults.ResolveTurnProfile()
+	if err != nil {
+		t.Fatalf("ResolveTurnProfile() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("ResolveTurnProfile() ok = false, want true")
+	}
+	if profile.HistoryMode != TurnProfileModeOff ||
+		profile.SystemPromptMode != TurnProfileModeOff ||
+		profile.SkillsMode != TurnProfileModeOff ||
+		profile.ToolsMode != TurnProfileModeCustom {
+		t.Fatalf("resolved clean_web modes = %+v", profile)
+	}
+	assert.Equal(t, []string{"web_search", "web_fetch"}, profile.AllowedTools)
+}
+
+func TestTurnProfileConfig_DisabledOrMissingIsNoop(t *testing.T) {
+	cfg := DefaultConfig()
+
+	profile, ok, err := cfg.Agents.Defaults.ResolveTurnProfile()
+	if err != nil {
+		t.Fatalf("ResolveTurnProfile(missing) error = %v", err)
+	}
+	if ok {
+		t.Fatal("ResolveTurnProfile(missing) ok = true, want false")
+	}
+	if profile.Enabled {
+		t.Fatalf("ResolveTurnProfile(missing) profile.Enabled = true, want false")
+	}
+
+	cfg.Agents.Defaults.TurnProfile = TurnProfileConfig{
+		Enabled: false,
+		History: TurnProfileBlock{
+			Mode: TurnProfileModeOff,
+		},
+	}
+	profile, ok, err = cfg.Agents.Defaults.ResolveTurnProfile()
+	if err != nil {
+		t.Fatalf("ResolveTurnProfile(disabled) error = %v", err)
+	}
+	if ok || profile.Enabled {
+		t.Fatalf("disabled profile = (%+v, %v), want no-op", profile, ok)
+	}
+
+	cfg.Agents.Defaults.TurnProfile = TurnProfileConfig{
+		Enabled: false,
+		History: TurnProfileBlock{
+			Mode: TurnProfileModeCustom,
+		},
+		Tools: TurnProfileBlock{
+			Mode: TurnProfileMode("sometimes"),
+		},
+	}
+	if err := cfg.ValidateTurnProfile(); err != nil {
+		t.Fatalf("ValidateTurnProfile(disabled unsupported modes) error = %v, want nil", err)
+	}
+}
+
+func TestTurnProfileConfig_ValidationRejectsUnsupportedModes(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "history custom unsupported",
+			raw:  `{"agents":{"defaults":{"turn_profile":{"enabled":true,"history":{"mode":"custom"}}}}}`,
+			want: "history.mode",
+		},
+		{
+			name: "system prompt custom unsupported",
+			raw:  `{"agents":{"defaults":{"turn_profile":{"enabled":true,"system_prompt":{"mode":"custom"}}}}}`,
+			want: "system_prompt.mode",
+		},
+		{
+			name: "unknown mode",
+			raw:  `{"agents":{"defaults":{"turn_profile":{"enabled":true,"tools":{"mode":"sometimes"}}}}}`,
+			want: "unsupported mode",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			if err := json.Unmarshal([]byte(tt.raw), cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			err := cfg.ValidateTurnProfile()
+			if err == nil {
+				t.Fatal("ValidateTurnProfile() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ValidateTurnProfile() error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDefaultConfig_MCPMaxInlineTextChars(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Tools.MCP.GetMaxInlineTextChars() != DefaultMCPMaxInlineTextChars {
@@ -506,18 +630,16 @@ func TestLoadConfig_MCPMaxInlineTextChars(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_SMSGatewayURLFromYAML(t *testing.T) {
+func TestLoadConfig_SMSGatewayURLFromJSON(t *testing.T) {
 	dir := t.TempDir()
-	configPath := filepath.Join(dir, "config.yml")
-	raw := `version: 2
-channels:
-  sms:
-    gateway_url: "http://127.0.0.1:8080"
-    api_key: "secret"
-    poll_interval: 7
-    timeout_seconds: 11
-    delete_after_read: true
-`
+	configPath := filepath.Join(dir, "config.json")
+	raw := `{"version":2,"channels":{"sms":{
+		"gateway_url":"http://127.0.0.1:8080",
+		"api_key":"secret",
+		"poll_interval":7,
+		"timeout_seconds":11,
+		"delete_after_read":true
+	}}}`
 	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -839,6 +961,29 @@ func TestDefaultConfig_WorkspacePath(t *testing.T) {
 	}
 }
 
+// TestDefaultConfig_AnthropicModelsUseClaudeAPIIDs verifies that first-party
+// Anthropic defaults use Claude API model IDs, not dotted display names or
+// Bedrock-style provider prefixes. See:
+// https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions
+func TestDefaultConfig_AnthropicModelsUseClaudeAPIIDs(t *testing.T) {
+	cfg := DefaultConfig()
+
+	checked := 0
+	for _, model := range cfg.ModelList {
+		if model.Provider != "anthropic" {
+			continue
+		}
+		checked++
+		if strings.Contains(model.Model, ".") {
+			t.Fatalf("Anthropic default model %q uses dotted ID %q", model.ModelName, model.Model)
+		}
+	}
+
+	if checked == 0 {
+		t.Fatal("DefaultConfig() missing Anthropic models")
+	}
+}
+
 // TestDefaultConfig_MaxTokens verifies max tokens has default value
 func TestDefaultConfig_MaxTokens(t *testing.T) {
 	cfg := DefaultConfig()
@@ -889,6 +1034,74 @@ func TestDefaultConfig_Channels(t *testing.T) {
 		if bc.Enabled {
 			t.Errorf("Channel %q should be disabled by default", name)
 		}
+	}
+}
+
+func TestDefaultConfig_ChannelStreamingDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+
+	telegram := cfg.Channels.Get(ChannelTelegram)
+	if telegram == nil {
+		t.Fatal("DefaultConfig() missing telegram channel")
+	}
+	decoded, err := telegram.GetDecoded()
+	if err != nil {
+		t.Fatalf("telegram GetDecoded() error = %v", err)
+	}
+	settings, ok := decoded.(*TelegramSettings)
+	if !ok {
+		t.Fatalf("telegram settings type = %T, want *TelegramSettings", decoded)
+	}
+	if settings.Streaming.Enabled {
+		t.Fatal("DefaultConfig().telegram.settings.streaming.enabled should be false")
+	}
+
+	pico := cfg.Channels.Get(ChannelPico)
+	if pico == nil {
+		t.Fatal("DefaultConfig() missing pico channel")
+	}
+	decoded, err = pico.GetDecoded()
+	if err != nil {
+		t.Fatalf("pico GetDecoded() error = %v", err)
+	}
+	picoSettings, ok := decoded.(*PicoSettings)
+	if !ok {
+		t.Fatalf("pico settings type = %T, want *PicoSettings", decoded)
+	}
+	if !picoSettings.Streaming.Enabled {
+		t.Fatal("DefaultConfig().pico.settings.streaming.enabled should be true")
+	}
+}
+
+func TestDefaultConfig_DeltaChatExample(t *testing.T) {
+	cfg := DefaultConfig()
+
+	deltachat := cfg.Channels.Get(ChannelDeltaChat)
+	if deltachat == nil {
+		t.Fatal("DefaultConfig() missing deltachat channel")
+	}
+	if deltachat.Enabled {
+		t.Fatal("DefaultConfig().deltachat should be disabled")
+	}
+	if !deltachat.GroupTrigger.MentionOnly {
+		t.Fatal("DefaultConfig().deltachat should use mention-only group trigger")
+	}
+	decoded, err := deltachat.GetDecoded()
+	if err != nil {
+		t.Fatalf("deltachat GetDecoded() error = %v", err)
+	}
+	settings, ok := decoded.(*DeltaChatSettings)
+	if !ok {
+		t.Fatalf("deltachat settings type = %T, want *DeltaChatSettings", decoded)
+	}
+	if settings.Email != "@nine.testrun.org" {
+		t.Fatalf("DefaultConfig().deltachat.settings.email = %q, want @nine.testrun.org", settings.Email)
+	}
+	if settings.Password.String() != "" {
+		t.Fatal("DefaultConfig().deltachat.settings.password should be empty")
+	}
+	if settings.DisplayName == "" {
+		t.Fatal("DefaultConfig().deltachat.settings.display_name should be populated")
 	}
 }
 
@@ -1028,6 +1241,49 @@ func TestSaveConfig_PreservesDisabledTelegramPlaceholder(t *testing.T) {
 	bc := loaded.Channels.Get("telegram")
 	if bc != nil && bc.Placeholder.Enabled {
 		t.Fatal("telegram placeholder should remain disabled after SaveConfig/LoadConfig round-trip")
+	}
+}
+
+func TestSaveConfig_PreservesExplicitDisabledPicoStreaming(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.json")
+
+	cfg := DefaultConfig()
+	pico := cfg.Channels.Get(ChannelPico)
+	if pico == nil {
+		t.Fatal("DefaultConfig() missing pico channel")
+	}
+	pico.Settings = RawNode(`{"streaming":{"enabled":false}}`)
+
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if !strings.Contains(string(data), `"streaming"`) || !strings.Contains(string(data), `"enabled": false`) {
+		t.Fatalf("saved config should preserve explicit disabled pico streaming, got:\n%s", string(data))
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	loadedPico := loaded.Channels.Get(ChannelPico)
+	if loadedPico == nil {
+		t.Fatal("loaded config missing pico channel")
+	}
+	decoded, err := loadedPico.GetDecoded()
+	if err != nil {
+		t.Fatalf("pico GetDecoded() error = %v", err)
+	}
+	settings, ok := decoded.(*PicoSettings)
+	if !ok {
+		t.Fatalf("pico settings type = %T, want *PicoSettings", decoded)
+	}
+	if settings.Streaming.Enabled {
+		t.Fatal("explicit disabled pico streaming should remain disabled after SaveConfig/LoadConfig round-trip")
 	}
 }
 
@@ -1303,6 +1559,46 @@ func TestDefaultConfig_FilterMinLength(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_LoadImageEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.Tools.LoadImage.Enabled {
+		t.Fatal("DefaultConfig().Tools.LoadImage.Enabled should be true")
+	}
+	if !cfg.Tools.IsToolEnabled("load_image") {
+		t.Fatal("DefaultConfig().Tools.IsToolEnabled(load_image) should be true")
+	}
+}
+
+func TestLoadConfig_LoadImageCanBeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	raw := "{\n  \"version\": 2,\n  \"tools\": {\n    \"load_image\": {\n      \"enabled\": false\n    }\n  }\n}\n"
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Tools.LoadImage.Enabled {
+		t.Fatal("LoadConfig().Tools.LoadImage.Enabled should be false")
+	}
+	if cfg.Tools.IsToolEnabled("load_image") {
+		t.Fatal("LoadConfig().Tools.IsToolEnabled(load_image) should be false")
+	}
+}
+
+func TestDefaultConfig_MessageMediaDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if !cfg.Tools.Message.Enabled {
+		t.Fatal("DefaultConfig().Tools.Message.Enabled should be true")
+	}
+	if cfg.Tools.Message.MediaEnabled {
+		t.Fatal("DefaultConfig().Tools.Message.MediaEnabled should be false")
+	}
+}
+
 func TestToolsConfig_GetFilterMinLength(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1327,6 +1623,16 @@ func TestDefaultConfig_CronAllowCommandEnabled(t *testing.T) {
 	cfg := DefaultConfig()
 	if !cfg.Tools.Cron.AllowCommand {
 		t.Fatal("DefaultConfig().Tools.Cron.AllowCommand should be true")
+	}
+}
+
+func TestDefaultConfig_CronCommandAllowedRemotesEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	if len(cfg.Tools.Cron.CommandAllowedRemotes) != 0 {
+		t.Fatalf(
+			"DefaultConfig().Tools.Cron.CommandAllowedRemotes = %#v, want empty",
+			cfg.Tools.Cron.CommandAllowedRemotes,
+		)
 	}
 }
 
@@ -1387,6 +1693,32 @@ func TestLoadConfig_CronAllowCommandDefaultsTrueWhenUnset(t *testing.T) {
 	}
 	if !cfg.Tools.Cron.AllowCommand {
 		t.Fatal("tools.cron.allow_command should remain true when unset in config file")
+	}
+}
+
+func TestLoadConfig_CronCommandAllowedRemotes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(
+		configPath,
+		[]byte(`{"version":1,"tools":{"cron":{"command_allowed_remotes":["telegram:1234567890","discord"]}}}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	want := []string{"telegram:1234567890", "discord"}
+	if len(cfg.Tools.Cron.CommandAllowedRemotes) != len(want) {
+		t.Fatalf("CommandAllowedRemotes = %#v, want %#v", cfg.Tools.Cron.CommandAllowedRemotes, want)
+	}
+	for i := range want {
+		if cfg.Tools.Cron.CommandAllowedRemotes[i] != want[i] {
+			t.Fatalf("CommandAllowedRemotes = %#v, want %#v", cfg.Tools.Cron.CommandAllowedRemotes, want)
+		}
 	}
 }
 
@@ -1515,6 +1847,166 @@ func TestDefaultConfig_SessionDimensions(t *testing.T) {
 
 	if len(cfg.Session.Dimensions) != 1 || cfg.Session.Dimensions[0] != "chat" {
 		t.Errorf("Session.Dimensions = %v, want [chat]", cfg.Session.Dimensions)
+	}
+}
+
+func TestSessionConfig_ApplyDmScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		dmScope    string
+		dimensions []string
+		want       []string
+	}{
+		{
+			name:    "per-channel-peer",
+			dmScope: "per-channel-peer",
+			want:    []string{"chat", "sender"},
+		},
+		{
+			name:    "per-channel",
+			dmScope: "per-channel",
+			want:    []string{"chat"},
+		},
+		{
+			name:    "per-peer",
+			dmScope: "per-peer",
+			want:    []string{"sender"},
+		},
+		{
+			name:    "global",
+			dmScope: "global",
+			want:    nil,
+		},
+		{
+			name:       "explicit dimensions take precedence",
+			dmScope:    "per-channel-peer",
+			dimensions: []string{"sender"},
+			want:       []string{"sender"},
+		},
+		{
+			name:    "empty dm_scope is no-op",
+			dmScope: "",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionConfig{
+				DmScope:    tt.dmScope,
+				Dimensions: tt.dimensions,
+			}
+			s.ApplyDmScope()
+			if len(s.Dimensions) != len(tt.want) {
+				t.Fatalf("Dimensions = %v, want %v", s.Dimensions, tt.want)
+			}
+			for i, v := range tt.want {
+				if s.Dimensions[i] != v {
+					t.Errorf("Dimensions[%d] = %q, want %q", i, s.Dimensions[i], v)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionConfig_DeriveDmScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		dimensions []string
+		dmScope    string
+		wantScope  string
+	}{
+		{
+			name:       "per-channel-peer from dimensions",
+			dimensions: []string{"chat", "sender"},
+			wantScope:  "per-channel-peer",
+		},
+		{
+			name:       "per-channel from dimensions",
+			dimensions: []string{"chat"},
+			wantScope:  "per-channel",
+		},
+		{
+			name:       "per-peer from dimensions",
+			dimensions: []string{"sender"},
+			wantScope:  "per-peer",
+		},
+		{
+			name:       "custom dimensions does not set scope",
+			dimensions: []string{"chat", "extra"},
+			wantScope:  "",
+		},
+		{
+			name:       "empty dimensions does not set scope",
+			dimensions: nil,
+			wantScope:  "",
+		},
+		{
+			name:       "existing dm_scope is not overwritten",
+			dimensions: []string{"chat", "sender"},
+			dmScope:    "per-channel",
+			wantScope:  "per-channel",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionConfig{
+				DmScope:    tt.dmScope,
+				Dimensions: tt.dimensions,
+			}
+			s.DeriveDmScope()
+			if s.DmScope != tt.wantScope {
+				t.Errorf("DmScope = %q, want %q", s.DmScope, tt.wantScope)
+			}
+		})
+	}
+}
+
+func TestSessionConfig_ApplyDmScope_ClearsStaleDimensions(t *testing.T) {
+	// Simulates the PATCH handler scenario: dm_scope changed but stale
+	// dimensions remain from the old scope. After clearing dimensions,
+	// ApplyDmScope should re-derive from the new dm_scope.
+	tests := []struct {
+		name    string
+		dmScope string
+		want    []string
+	}{
+		{
+			name:    "per-channel-peer to per-channel",
+			dmScope: "per-channel",
+			want:    []string{"chat"},
+		},
+		{
+			name:    "per-channel-peer to per-peer",
+			dmScope: "per-peer",
+			want:    []string{"sender"},
+		},
+		{
+			name:    "per-channel-peer to global",
+			dmScope: "global",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SessionConfig{
+				DmScope:    tt.dmScope,
+				Dimensions: []string{"chat", "sender"}, // stale from per-channel-peer
+			}
+			// Simulate what the PATCH handler does: clear dimensions when dm_scope changes
+			s.Dimensions = nil
+			s.ApplyDmScope()
+			if len(s.Dimensions) != len(tt.want) {
+				t.Fatalf("Dimensions = %v, want %v", s.Dimensions, tt.want)
+			}
+			for i, v := range tt.want {
+				if s.Dimensions[i] != v {
+					t.Errorf("Dimensions[%d] = %q, want %q", i, s.Dimensions[i], v)
+				}
+			}
+		})
 	}
 }
 
@@ -2628,7 +3120,7 @@ func TestFilterSensitiveData_AllTokenTypes(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// makeBackup tests
+// MakeBackup tests
 // ---------------------------------------------------------------------------
 
 // TestMakeBackup_WithDateSuffix verifies backup files include a date suffix.
@@ -2639,8 +3131,8 @@ func TestMakeBackup_WithDateSuffix(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	if err := makeBackup(configPath); err != nil {
-		t.Fatalf("makeBackup: %v", err)
+	if err := MakeBackup(configPath); err != nil {
+		t.Fatalf("MakeBackup: %v", err)
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -2679,8 +3171,8 @@ func TestMakeBackup_AlsoBacksSecurityFile(t *testing.T) {
 	os.WriteFile(configPath, []byte(`{"version":2}`), 0o600)
 	os.WriteFile(secPath, []byte(`model_list:\n  test:0:\n    api_keys:\n      - "sk-test"\n`), 0o600)
 
-	if err := makeBackup(configPath); err != nil {
-		t.Fatalf("makeBackup: %v", err)
+	if err := MakeBackup(configPath); err != nil {
+		t.Fatalf("MakeBackup: %v", err)
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -2706,14 +3198,14 @@ func TestMakeBackup_AlsoBacksSecurityFile(t *testing.T) {
 	}
 }
 
-// TestMakeBackup_NonexistentFileSkipsBackup verifies that makeBackup returns nil
+// TestMakeBackup_NonexistentFileSkipsBackup verifies that MakeBackup returns nil
 // when the config file does not exist (no error, no panic).
 func TestMakeBackup_NonexistentFileSkipsBackup(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "nonexistent.json")
 
-	if err := makeBackup(configPath); err != nil {
-		t.Fatalf("makeBackup on nonexistent file should return nil, got: %v", err)
+	if err := MakeBackup(configPath); err != nil {
+		t.Fatalf("MakeBackup on nonexistent file should return nil, got: %v", err)
 	}
 }
 
@@ -2724,8 +3216,8 @@ func TestMakeBackup_OnlyConfigNoSecurity(t *testing.T) {
 	configPath := filepath.Join(dir, "config.json")
 	os.WriteFile(configPath, []byte(`{"version":2}`), 0o600)
 
-	if err := makeBackup(configPath); err != nil {
-		t.Fatalf("makeBackup: %v", err)
+	if err := MakeBackup(configPath); err != nil {
+		t.Fatalf("MakeBackup: %v", err)
 	}
 
 	entries, _ := os.ReadDir(dir)
@@ -2748,7 +3240,7 @@ func TestMakeBackup_OnlyConfigNoSecurity(t *testing.T) {
 }
 
 // TestMakeBackup_SameDateSuffix verifies that config and security backups
-// share the same date suffix (they are created in the same makeBackup call).
+// share the same date suffix (they are created in the same MakeBackup call).
 func TestMakeBackup_SameDateSuffix(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.json")
@@ -2757,8 +3249,8 @@ func TestMakeBackup_SameDateSuffix(t *testing.T) {
 	os.WriteFile(configPath, []byte(`{"version":2}`), 0o600)
 	os.WriteFile(secPath, []byte(`key: value`), 0o600)
 
-	if err := makeBackup(configPath); err != nil {
-		t.Fatalf("makeBackup: %v", err)
+	if err := MakeBackup(configPath); err != nil {
+		t.Fatalf("MakeBackup: %v", err)
 	}
 
 	entries, _ := os.ReadDir(dir)

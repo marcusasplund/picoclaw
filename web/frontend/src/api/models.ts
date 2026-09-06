@@ -20,6 +20,9 @@ export interface ModelInfo {
   request_timeout?: number
   thinking_level?: string
   tool_schema_transform?: string
+  streaming?: {
+    enabled?: boolean
+  }
   extra_body?: Record<string, unknown>
   custom_headers?: Record<string, string>
   // Meta
@@ -33,25 +36,48 @@ export interface ModelInfo {
 
 export interface ModelProviderOption {
   id: string
+  display_name?: string
+  icon_slug?: string
+  domain?: string
   default_api_base: string
   empty_api_key_allowed: boolean
   create_allowed: boolean
   default_model_allowed: boolean
+  supports_fetch?: boolean
   default_auth_method?: string
   auth_method_locked?: boolean
+  local?: boolean
+  priority?: number
+  common_models?: string[]
+  aliases?: string[]
 }
 
 interface ModelsListResponse {
   models: ModelInfo[]
   total: number
   default_model: string
+  default_provider: string
+  fallback_chain: string[]
   provider_options: ModelProviderOption[]
 }
 
-interface ModelActionResponse {
+export interface ModelReferenceRename {
+  from: string
+  to: string
+  default: boolean
+  fallback: boolean
+}
+
+export interface ModelActionResponse {
   status: string
   index?: number
   default_model?: string
+  reference_rename?: ModelReferenceRename
+}
+
+export interface DefaultChain {
+  default_model: string
+  fallback_chain: string[]
 }
 
 const BASE_URL = ""
@@ -114,6 +140,20 @@ export async function setDefaultModel(
   return response
 }
 
+export async function getDefaultChain(): Promise<DefaultChain> {
+  return request<DefaultChain>("/api/models/default-chain")
+}
+
+export async function updateDefaultChain(
+  payload: DefaultChain,
+): Promise<DefaultChain> {
+  return request<DefaultChain>("/api/models/default-chain", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+}
+
 export interface TestModelResponse {
   success: boolean
   latency_ms: number
@@ -149,12 +189,14 @@ export async function testModelInline(
 export interface UpstreamModel {
   id: string
   owned_by?: string
+  extra?: Record<string, unknown>
 }
 
 export interface FetchModelsRequest {
   provider: string
   api_key?: string
   api_base?: string
+  model_index?: number
 }
 
 export interface FetchModelsResponse {
@@ -207,4 +249,4 @@ export async function deleteCatalog(id: string): Promise<void> {
   )
 }
 
-export type { ModelsListResponse, ModelActionResponse }
+export type { ModelsListResponse }

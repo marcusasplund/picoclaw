@@ -18,11 +18,18 @@ func TestSMSChannelSendPostsExpectedPayload(t *testing.T) {
 	var gotBody sendRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/sms/unread" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"messages":[]}`))
+			return
+		}
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("X-API-Key")
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

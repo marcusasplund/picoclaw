@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -195,6 +196,9 @@ type ExposePath struct {
 // Uses strings.Replacer for O(n+m) performance (computed once per SecurityConfig).
 // Short content (below FilterMinLength) is returned unchanged for performance.
 func (c *Config) FilterSensitiveData(content string) string {
+	if c == nil {
+		return content
+	}
 	// Check if filtering is enabled (default: true)
 	if !c.Tools.IsFilterSensitiveDataEnabled() {
 		return content
@@ -255,7 +259,7 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		Alias: (*Alias)(c),
 	}
 
-	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 {
+	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 || c.Session.DmScope != "" {
 		sessionCfg := c.Session
 		aux.Session = &sessionCfg
 	}
@@ -347,6 +351,47 @@ type DispatchSelector struct {
 type SessionConfig struct {
 	Dimensions    []string            `json:"dimensions,omitempty"`
 	IdentityLinks map[string][]string `json:"identity_links,omitempty"`
+	DmScope       string              `json:"dm_scope,omitempty"`
+}
+
+// ApplyDmScope translates the user-facing dm_scope value into the internal
+// dimensions array that the routing layer consumes. It is a no-op when
+// DmScope is empty or when Dimensions is already set (explicit Dimensions
+// take precedence over the derived value).
+func (s *SessionConfig) ApplyDmScope() {
+	if s.DmScope == "" || len(s.Dimensions) > 0 {
+		return
+	}
+	switch s.DmScope {
+	case "per-channel-peer":
+		s.Dimensions = []string{"chat", "sender"}
+	case "per-channel":
+		s.Dimensions = []string{"chat"}
+	case "per-peer":
+		s.Dimensions = []string{"sender"}
+	case "global":
+		s.Dimensions = nil
+	}
+}
+
+// DeriveDmScope sets DmScope based on Dimensions when DmScope is empty.
+// This handles legacy/fresh configs that only have explicit Dimensions
+// without a corresponding DmScope value, ensuring the API response always
+// includes a dm_scope that matches the actual runtime dimensions.
+func (s *SessionConfig) DeriveDmScope() {
+	if s.DmScope != "" || len(s.Dimensions) == 0 {
+		return
+	}
+	switch {
+	case slices.Equal(s.Dimensions, []string{"chat", "sender"}):
+		s.DmScope = "per-channel-peer"
+	case slices.Equal(s.Dimensions, []string{"chat"}):
+		s.DmScope = "per-channel"
+	case slices.Equal(s.Dimensions, []string{"sender"}):
+		s.DmScope = "per-peer"
+	}
+	// Dimensions not matching any known scope mapping (custom array)
+	// is fine — DmScope stays empty and the UI can handle it.
 }
 
 // RoutingConfig controls the intelligent model routing feature.
@@ -400,6 +445,7 @@ type AgentDefaults struct {
 	SplitOnMarker             bool               `json:"split_on_marker"                  env:"PICOCLAW_AGENTS_DEFAULTS_SPLIT_ON_MARKER"` // split messages on <|[SPLIT]|> marker
 	ContextManager            string             `json:"context_manager,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER"`
 	ContextManagerConfig      json.RawMessage    `json:"context_manager_config,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_CONTEXT_MANAGER_CONFIG"`
+	TurnProfile               TurnProfileConfig  `json:"turn_profile,omitempty"`
 	MaxLLMRetries             int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
 	LLMRetryBackoffSecs       int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
 }
@@ -469,9 +515,25 @@ func (p *PlaceholderConfig) GetRandomText() string {
 }
 
 type StreamingConfig struct {
-	Enabled         bool `json:"enabled,omitempty"          env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED"`
-	ThrottleSeconds int  `json:"throttle_seconds,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS"`
-	MinGrowthChars  int  `json:"min_growth_chars,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS"`
+	Enabled         bool `json:"enabled,omitempty"`
+	ThrottleSeconds int  `json:"throttle_seconds,omitempty"`
+	MinGrowthChars  int  `json:"min_growth_chars,omitempty"`
+}
+
+func (c StreamingConfig) IsZero() bool {
+	return !c.Enabled && c.ThrottleSeconds == 0 && c.MinGrowthChars == 0
+}
+
+func (c StreamingConfig) WithDefaults(throttleSeconds, minGrowthChars int) StreamingConfig {
+	if c.Enabled {
+		if c.ThrottleSeconds == 0 {
+			c.ThrottleSeconds = throttleSeconds
+		}
+		if c.MinGrowthChars == 0 {
+			c.MinGrowthChars = minGrowthChars
+		}
+	}
+	return c
 }
 
 type WhatsAppSettings struct {
@@ -484,7 +546,7 @@ type TelegramSettings struct {
 	Token             SecureString    `json:"token,omitzero"       yaml:"token,omitempty" env:"PICOCLAW_CHANNELS_TELEGRAM_TOKEN"`
 	BaseURL           string          `json:"base_url"             yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_BASE_URL"`
 	Proxy             string          `json:"proxy"                yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_PROXY"`
-	Streaming         StreamingConfig `json:"streaming,omitempty"  yaml:"-"`
+	Streaming         StreamingConfig `json:"streaming,omitzero"   yaml:"-"`
 	UseMarkdownV2     bool            `json:"use_markdown_v2"      yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 	MediaGroupDelayMS int             `json:"media_group_delay_ms" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_GROUP_DELAY_MS"`
 }
@@ -554,6 +616,31 @@ type MatrixSettings struct {
 	CryptoPassphrase   string       `json:"crypto_passphrase,omitempty"    yaml:"-"`
 }
 
+// DeltaChatSettings configures the Delta Chat channel. Delta Chat is an
+// email-based, end-to-end encrypted messenger; PicoClaw talks to a local
+// `deltachat-rpc-server` process over JSON-RPC (stdio).
+//
+// Email is the only required setting. A full address selects an already
+// configured account in DataDir; a first-run marker such as "@nine.testrun.org"
+// creates a chatmail account and tells the user which full email to save.
+// Mailbox credentials stay in the Delta Chat account store. DisplayName and
+// AvatarImage are optional profile settings applied on startup. Password remains
+// only for legacy PicoClaw-managed email configuration.
+type DeltaChatSettings struct {
+	Email          string       `json:"email"                     yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_EMAIL"`
+	Password       SecureString `json:"password,omitzero"         yaml:"password,omitempty" env:"PICOCLAW_CHANNELS_DELTACHAT_PASSWORD"`
+	DisplayName    string       `json:"display_name,omitempty"    yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_DISPLAY_NAME"`
+	AvatarImage    string       `json:"avatar_image,omitempty"    yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_AVATAR_IMAGE"`
+	DataDir        string       `json:"data_dir,omitempty"        yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_DATA_DIR"`
+	RPCServerPath  string       `json:"rpc_server_path,omitempty" yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_RPC_SERVER_PATH"`
+	InviteLink     string       `json:"invite_link,omitempty"     yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_INVITE_LINK"`
+	AllowCrosspost bool         `json:"allow_crosspost,omitempty" yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_ALLOW_CROSSPOST"`
+	IMAPServer     string       `json:"imap_server,omitempty"     yaml:"-"`
+	IMAPPort       int          `json:"imap_port,omitempty"       yaml:"-"`
+	SMTPServer     string       `json:"smtp_server,omitempty"     yaml:"-"`
+	SMTPPort       int          `json:"smtp_port,omitempty"       yaml:"-"`
+}
+
 type LINESettings struct {
 	ChannelSecret      SecureString `json:"channel_secret,omitzero"       yaml:"channel_secret,omitempty"       env:"PICOCLAW_CHANNELS_LINE_CHANNEL_SECRET"`
 	ChannelAccessToken SecureString `json:"channel_access_token,omitzero" yaml:"channel_access_token,omitempty" env:"PICOCLAW_CHANNELS_LINE_CHANNEL_ACCESS_TOKEN"`
@@ -574,10 +661,11 @@ type WeComGroupConfig struct {
 }
 
 type WeComSettings struct {
-	BotID               string       `json:"bot_id"                  yaml:"-"                env:"BOT_ID"`
-	Secret              SecureString `json:"secret,omitzero"         yaml:"secret,omitempty" env:"SECRET"`
-	WebSocketURL        string       `json:"websocket_url,omitempty" yaml:"-"                env:"WEBSOCKET_URL"`
-	SendThinkingMessage bool         `json:"send_thinking_message"   yaml:"-"                env:"SEND_THINKING_MESSAGE"`
+	BotID               string          `json:"bot_id"                  yaml:"-"                env:"BOT_ID"`
+	Secret              SecureString    `json:"secret,omitzero"         yaml:"secret,omitempty" env:"SECRET"`
+	WebSocketURL        string          `json:"websocket_url,omitempty" yaml:"-"                env:"WEBSOCKET_URL"`
+	SendThinkingMessage bool            `json:"send_thinking_message"   yaml:"-"                env:"SEND_THINKING_MESSAGE"`
+	Streaming           StreamingConfig `json:"streaming,omitzero"      yaml:"-"`
 }
 
 func (c *WeComSettings) SetSecret(secret string) {
@@ -598,13 +686,14 @@ func (c *WeixinSettings) SetToken(token string) {
 }
 
 type PicoSettings struct {
-	Token           SecureString `json:"token,omitzero"              yaml:"token,omitempty" env:"PICOCLAW_CHANNELS_PICO_TOKEN"`
-	AllowTokenQuery bool         `json:"allow_token_query,omitempty" yaml:"-"`
-	AllowOrigins    []string     `json:"allow_origins,omitempty"     yaml:"-"`
-	PingInterval    int          `json:"ping_interval,omitempty"     yaml:"-"`
-	ReadTimeout     int          `json:"read_timeout,omitempty"      yaml:"-"`
-	WriteTimeout    int          `json:"write_timeout,omitempty"     yaml:"-"`
-	MaxConnections  int          `json:"max_connections,omitempty"   yaml:"-"`
+	Token           SecureString    `json:"token,omitzero"              yaml:"token,omitempty" env:"PICOCLAW_CHANNELS_PICO_TOKEN"`
+	AllowTokenQuery bool            `json:"allow_token_query,omitempty" yaml:"-"`
+	AllowOrigins    []string        `json:"allow_origins,omitempty"     yaml:"-"`
+	Streaming       StreamingConfig `json:"streaming,omitzero"          yaml:"-"`
+	PingInterval    int             `json:"ping_interval,omitempty"     yaml:"-"`
+	ReadTimeout     int             `json:"read_timeout,omitempty"      yaml:"-"`
+	WriteTimeout    int             `json:"write_timeout,omitempty"     yaml:"-"`
+	MaxConnections  int             `json:"max_connections,omitempty"   yaml:"-"`
 }
 
 // SetToken sets the Pico token and marks it as dirty for security saving
@@ -695,6 +784,14 @@ type VoiceConfig struct {
 	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
 }
 
+type ModelStreamingConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+func (c ModelStreamingConfig) IsZero() bool {
+	return !c.Enabled
+}
+
 // ModelConfig represents a model-centric provider configuration.
 // It allows adding new providers (especially OpenAI-compatible ones) via configuration only.
 // The Model field may be either a plain model identifier or a provider-prefixed
@@ -719,13 +816,14 @@ type ModelConfig struct {
 	Workspace   string `json:"workspace,omitempty"`    // Workspace path for CLI-based providers
 
 	// Optional optimizations
-	RPM                 int               `json:"rpm,omitempty"`              // Requests per minute limit
-	MaxTokensField      string            `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
-	RequestTimeout      int               `json:"request_timeout,omitempty"`
-	ThinkingLevel       string            `json:"thinking_level,omitempty"`        // Extended thinking: off|low|medium|high|xhigh|adaptive
-	ToolSchemaTransform string            `json:"tool_schema_transform,omitempty"` // Optional tool schema compatibility transform (e.g. "simple")
-	ExtraBody           map[string]any    `json:"extra_body,omitempty"`            // Additional fields to inject into request body
-	CustomHeaders       map[string]string `json:"custom_headers,omitempty"`        // Additional headers to inject into every HTTP request
+	RPM                 int                  `json:"rpm,omitempty"`              // Requests per minute limit
+	MaxTokensField      string               `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
+	RequestTimeout      int                  `json:"request_timeout,omitempty"`
+	ThinkingLevel       string               `json:"thinking_level,omitempty"`        // Extended thinking: off|low|medium|high|xhigh|adaptive
+	ToolSchemaTransform string               `json:"tool_schema_transform,omitempty"` // Optional tool schema compatibility transform (e.g. "simple")
+	Streaming           ModelStreamingConfig `json:"streaming,omitzero"`              // Opt-in for provider streaming on this model entry
+	ExtraBody           map[string]any       `json:"extra_body,omitempty"`            // Additional fields to inject into request body
+	CustomHeaders       map[string]string    `json:"custom_headers,omitempty"`        // Additional headers to inject into every HTTP request
 
 	APIKeys SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty"` // API authentication keys (multiple keys for failover)
 
@@ -803,6 +901,12 @@ type ToolConfig struct {
 	Enabled bool `json:"enabled" yaml:"-" env:"ENABLED"`
 }
 
+type MessageToolsConfig struct {
+	ToolConfig `yaml:"-" envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+
+	MediaEnabled bool `json:"media_enabled" yaml:"-" env:"PICOCLAW_TOOLS_MESSAGE_MEDIA_ENABLED"`
+}
+
 type BraveConfig struct {
 	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_BRAVE_ENABLED"`
 	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_BRAVE_API_KEYS"`
@@ -852,6 +956,31 @@ func (c *TavilyConfig) SetAPIKeys(keys []string) {
 	for i, k := range keys {
 		c.APIKeys[i] = NewSecureString(k)
 	}
+}
+
+type KagiConfig struct {
+	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_ENABLED"`
+	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_KAGI_API_KEYS"`
+	BaseURL    string        `json:"base_url"          yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_BASE_URL"`
+	MaxResults int           `json:"max_results"       yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_MAX_RESULTS"`
+}
+
+// APIKey returns the Kagi API key
+func (c *KagiConfig) APIKey() string {
+	if len(c.APIKeys) == 0 {
+		return ""
+	}
+	return c.APIKeys[0].String()
+}
+
+// SetAPIKey sets the Kagi API key
+func (c *KagiConfig) SetAPIKey(key string) {
+	c.APIKeys = SimpleSecureStrings(key)
+}
+
+// SetAPIKeys sets the Kagi API keys
+func (c *KagiConfig) SetAPIKeys(keys []string) {
+	c.APIKeys = SimpleSecureStrings(keys...)
 }
 
 type DuckDuckGoConfig struct {
@@ -917,6 +1046,7 @@ type WebToolsConfig struct {
 	ToolConfig  `                   yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
 	Brave       BraveConfig        `yaml:"brave,omitempty"                                        json:"brave"`
 	Tavily      TavilyConfig       `yaml:"tavily,omitempty"                                       json:"tavily"`
+	Kagi        KagiConfig         `yaml:"kagi,omitempty"                                         json:"kagi"`
 	Sogou       SogouConfig        `yaml:"-"                                                      json:"sogou"`
 	DuckDuckGo  DuckDuckGoConfig   `yaml:"-"                                                      json:"duckduckgo"`
 	Gemini      GeminiSearchConfig `yaml:"gemini,omitempty"                                       json:"gemini"`
@@ -940,9 +1070,11 @@ type WebToolsConfig struct {
 }
 
 type CronToolsConfig struct {
-	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"        env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_CRON_"`
+	// 0 means no timeout.
+	ExecTimeoutMinutes    int      `json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
+	AllowCommand          bool     `json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	CommandAllowedRemotes []string `json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
 }
 
 type ExecConfig struct {
@@ -1014,7 +1146,8 @@ type ToolsConfig struct {
 	I2C             ToolConfig         `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
 	InstallSkill    ToolConfig         `json:"install_skill"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_INSTALL_SKILL_"`
 	ListDir         ToolConfig         `json:"list_dir"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LIST_DIR_"`
-	Message         ToolConfig         `json:"message"           yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_MESSAGE_"`
+	LoadImage       ToolConfig         `json:"load_image"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_LOAD_IMAGE_"`
+	Message         MessageToolsConfig `json:"message"           yaml:"-"`
 	ReadFile        ReadFileToolConfig `json:"read_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_READ_FILE_"`
 	Serial          ToolConfig         `json:"serial"            yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SERIAL_"`
 	SendFile        ToolConfig         `json:"send_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SEND_FILE_"`
@@ -1255,7 +1388,7 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
-		err = makeBackup(path)
+		err = MakeBackup(path)
 		if err != nil {
 			return nil, err
 		}
@@ -1309,7 +1442,7 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
-		err = makeBackup(path)
+		err = MakeBackup(path)
 		if err != nil {
 			return nil, err
 		}
@@ -1361,7 +1494,7 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
-		err = makeBackup(path)
+		err = MakeBackup(path)
 		if err != nil {
 			return nil, err
 		}
@@ -1408,6 +1541,9 @@ func LoadConfig(path string) (*Config, error) {
 	if err = InitChannelList(cfg.Channels); err != nil {
 		return nil, err
 	}
+	if err = cfg.ValidateTurnProfile(); err != nil {
+		return nil, err
+	}
 	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
 	if err != nil {
 		return nil, fmt.Errorf("invalid gateway host: %w", err)
@@ -1426,6 +1562,9 @@ func LoadConfig(path string) (*Config, error) {
 		homePath := GetHome()
 		cfg.Agents.Defaults.Workspace = filepath.Join(homePath, pkg.WorkspaceName)
 	}
+
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
 
 	return cfg, nil
 }
@@ -1545,7 +1684,7 @@ func applySkillsRegistryEnvCompat(cfg *Config) {
 	cfg.Tools.Skills.Registries.Set("github", githubCfg)
 }
 
-func makeBackup(path string) error {
+func MakeBackup(path string) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
@@ -1673,6 +1812,21 @@ func (c *Config) SecurityCopyFrom(path string) error {
 	return loadSecurityConfig(c, securityPath(path))
 }
 
+// ResetToDefaults backs up the current config, creates a default config,
+// preserves security credentials from the existing config, and saves it.
+func ResetToDefaults(configPath string) error {
+	if err := MakeBackup(configPath); err != nil {
+		return fmt.Errorf("backup before reset: %w", err)
+	}
+	cfg := DefaultConfig()
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
+	if err := cfg.SecurityCopyFrom(configPath); err != nil {
+		logger.WarnF("could not preserve security config", map[string]any{"error": err})
+	}
+	return SaveConfig(configPath, cfg)
+}
+
 func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 	var expanded []*ModelConfig
 
@@ -1710,6 +1864,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 				RequestTimeout:      m.RequestTimeout,
 				ThinkingLevel:       m.ThinkingLevel,
 				ToolSchemaTransform: m.ToolSchemaTransform,
+				Streaming:           m.Streaming,
 				ExtraBody:           m.ExtraBody,
 				CustomHeaders:       m.CustomHeaders,
 				UserAgent:           m.UserAgent,
@@ -1734,6 +1889,7 @@ func expandMultiKeyModels(models []*ModelConfig) []*ModelConfig {
 			RequestTimeout:      m.RequestTimeout,
 			ThinkingLevel:       m.ThinkingLevel,
 			ToolSchemaTransform: m.ToolSchemaTransform,
+			Streaming:           m.Streaming,
 			ExtraBody:           m.ExtraBody,
 			CustomHeaders:       m.CustomHeaders,
 			UserAgent:           m.UserAgent,
@@ -1777,6 +1933,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.InstallSkill.Enabled
 	case "list_dir":
 		return t.ListDir.Enabled
+	case "load_image":
+		return t.LoadImage.Enabled
 	case "message":
 		return t.Message.Enabled
 	case "read_file":
