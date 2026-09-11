@@ -361,6 +361,10 @@ func (c *SlackChannel) handleMessageEvent(ev *slackevents.MessageEvent) {
 		content = cleaned
 	}
 
+	if c.handleStaticFlow(ev.User, channelID, threadTS, messageTS, content) {
+		return
+	}
+
 	var mediaPaths []string
 
 	scope := channels.BuildMediaScope("slack", chatID, messageTS)
@@ -446,6 +450,10 @@ func (c *SlackChannel) handleAppMention(ev *slackevents.AppMentionEvent) {
 		logger.DebugCF("slack", "Mention rejected by allowlist", map[string]any{
 			"user_id": ev.User,
 		})
+		return
+	}
+
+	if c.handleStaticFlow(ev.User, ev.Channel, ev.ThreadTimeStamp, ev.TimeStamp, ev.Text) {
 		return
 	}
 
