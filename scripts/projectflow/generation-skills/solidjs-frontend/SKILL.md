@@ -34,7 +34,7 @@ Skapa och ändra frontendkod i användarens projekt. Mattea är en referens för
 
 ## API-integration
 
-- Bekräfta endpoint, datatyper, felstruktur och autentiseringssätt med befintlig backend eller avtalad API-specifikation. Anta inte att Duchats login, JWT, SMS eller WebSockets behövs i varje app.
+- Bekräfta endpoint, datatyper, felstruktur och autentiseringssätt med befintlig backend eller avtalad API-specifikation.
 - Samla HTTP-anrop i en liten typad klient; kontrollera `response.ok`. TypeScript-typer validerar inte nätverksdata vid körning: validera de fält som appens funktion förlitar sig på.
 - Använd exempelvis `createResource` för hämtningar och explicita pending-/felstatusar för mutationer. Förhindra dubbel submit och uppdatera/refetcha data först efter rätt svar.
 - Föredra relativa `/api/...`-URL:er när frontend och backend ska ligga bakom samma domän. En lokal Vite-proxy är utvecklingskonfiguration; den ersätter inte produktionsrouting.

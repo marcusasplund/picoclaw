@@ -1,0 +1,153 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@layer base {
+  :root {
+    --background: 42 24% 96%;
+    --foreground: 218 15% 24%;
+
+    --muted: 40 18% 92%;
+    --muted-foreground: 218 9% 43%;
+
+    --popover: 42 30% 99%;
+    --popover-foreground: 218 15% 24%;
+
+    --border: 34 16% 84%;
+    --input: 34 16% 84%;
+
+    --card: 42 30% 99%;
+    --card-foreground: 218 15% 24%;
+
+    --primary: 201 30% 34%;
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 38 24% 91%;
+    --secondary-foreground: 218 15% 24%;
+
+    --accent: 199 24% 91%;
+    --accent-foreground: 202 32% 26%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+
+    --info: 204 94% 94%;
+    --info-foreground: 199 89% 48%;
+
+    --success: 149 80% 90%;
+    --success-foreground: 160 84% 39%;
+
+    --warning: 48 96% 89%;
+    --warning-foreground: 25 95% 53%;
+
+    --error: 0 93% 94%;
+    --error-foreground: 0 84% 60%;
+
+    --ring: 201 30% 34%;
+
+    --radius: 0.5rem;
+
+    --font-heading: var(--font-ui);
+    --font-ui: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+    --sidebar-background: 40 24% 94%;
+    --sidebar-foreground: 220 12% 26%;
+    --sidebar-primary: 201 30% 34%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 38 22% 89%;
+    --sidebar-accent-foreground: 218 15% 24%;
+    --sidebar-border: 34 16% 84%;
+    --sidebar-ring: 201 30% 34%;
+  }
+
+  .dark,
+  [data-kb-theme="dark"] {
+    --background: 220 14% 11%;
+    --foreground: 40 15% 88%;
+
+    --muted: 220 10% 18%;
+    --muted-foreground: 40 8% 66%;
+
+    --accent: 202 18% 21%;
+    --accent-foreground: 199 45% 78%;
+
+    --popover: 220 13% 13%;
+    --popover-foreground: 40 15% 88%;
+
+    --border: 220 10% 25%;
+    --input: 220 10% 25%;
+
+    --card: 220 13% 13%;
+    --card-foreground: 40 15% 88%;
+
+    --primary: 201 35% 66%;
+    --primary-foreground: 220 17% 12%;
+
+    --secondary: 220 10% 19%;
+    --secondary-foreground: 40 15% 88%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+
+    --info: 204 38% 18%;
+    --info-foreground: 199 72% 78%;
+
+    --success: 154 32% 18%;
+    --success-foreground: 149 55% 74%;
+
+    --warning: 43 38% 20%;
+    --warning-foreground: 40 76% 76%;
+
+    --error: 0 36% 20%;
+    --error-foreground: 0 76% 78%;
+
+    --ring: 201 35% 66%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 220 13% 13%;
+    --sidebar-foreground: 40 12% 86%;
+    --sidebar-primary: 201 35% 66%;
+    --sidebar-primary-foreground: 220 17% 12%;
+    --sidebar-accent: 220 10% 19%;
+    --sidebar-accent-foreground: 40 15% 88%;
+    --sidebar-border: 220 10% 25%;
+    --sidebar-ring: 201 35% 66%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-ui);
+    font-weight: 400;
+    font-kerning: normal;
+    font-optical-sizing: auto;
+    line-height: 1.6;
+    font-feature-settings:
+      var(--default-font-feature-settings, normal);
+    font-variation-settings:
+      var(--default-font-variation-settings, normal);
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    font-weight: 480;
+    letter-spacing: 0.01em;
+    line-height: 1.24;
+  }
+}
+
+
+.skip-link { position: fixed; top: 0.5rem; left: 0.5rem; z-index: 100; transform: translateY(-200%); padding: 0.5rem 1rem; background: hsl(var(--background)); color: hsl(var(--foreground)); }
+.skip-link:focus { transform: translateY(0); outline: 2px solid hsl(var(--ring)); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; scroll-behavior: auto !important; }
+}

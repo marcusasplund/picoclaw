@@ -54,6 +54,36 @@
 > * **NOTE:** PicoClaw is in early rapid development. There may be unresolved security issues. Do not deploy to production before v1.0.
 > * **NOTE:** PicoClaw has recently merged many PRs. Recent builds may use 10-20MB RAM. Resource optimization is planned after feature stabilization.
 
+## Project generation pipeline
+
+The planned evolution of the opt-in project workflow uses a durable state machine
+for approvals, bounded repairs, pause/resume, and recovery. The graph below shows
+the target flow; optional interviews, expanded review, and learning promotion are
+planned work. See [implementation tasks](todo.md) and the
+[current projectflow documentation](scripts/projectflow/README.md).
+
+```mermaid
+flowchart TD
+    A[Request] --> B[Optional interview]
+    B --> C[Brief + acceptance criteria]
+    C --> D[Plan + approval]
+    D --> E[Build]
+    E --> F[Automated checks]
+    F -->|Failure within budget| G[Diagnose + repair]
+    G --> F
+    F -->|Pass| H[Browser and design review]
+    H -->|Actionable findings| G
+    H -->|Pass| I[Verified artifact → preview → release]
+    F --> J[Record failures and fixes]
+    H --> J
+    J --> K[Evaluate learning candidates]
+    K --> L[Versioned improvements for future jobs]
+```
+
+Required checks and review repairs have finite budgets; exhausted or blocked runs
+retain their evidence without progressing to deployment. Learning candidates are
+evaluated separately and do not change the frozen instructions of active jobs.
+
 ## 📢 News
 
 2026-05-11 🛒 **LicheeRV-Claw on AliExpress!** You can now purchase LicheeRV-Claw from [AliExpress](https://www.aliexpress.com/item/1005006519668532.html), making it easier to try PicoClaw on compact RISC-V hardware.

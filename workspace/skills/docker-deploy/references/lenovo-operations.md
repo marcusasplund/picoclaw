@@ -28,17 +28,9 @@ Projektets `scripts/staticflow/` och `pkg/channels/slack/staticflow.go` implemen
 
 Dessa egenskaper är inte bevis på att någon Dockerbyggare, Compose-runner eller containerbaserad preview redan finns. Skills måste kopplas till den framtida projektbyggaren; att installera SKILL.md ändrar inte verktygsstödet.
 
-## Referensen Duchat
-
-Duchats backend kör som en Phoenix-release i Docker. Den granskade Compose-filen har fast containernamn, port `4000:4000` och det externa nätverket `duchat-net`. Den deklarerar inte databasen, även om användarens containerlista visar en separat `duchat-db`.
-
-Kopiera därför inte Compose-filen som en fristående mall för nya appar. En ny stack behöver eget projektnamn, definierade beroenden och beständig datavolym. Duchats befintliga containrar eller nätverk ska inte kopplas om för att starta ett annat projekt.
-
-Dess release-modul kan köra migreringar, men det granskade deployscriptet bygger och återskapar backend utan att anropa migrering eller automatisk hälsokontroll. Den framtida deployfunktionen behöver göra dessa steg explicita.
-
 ## Viktiga lärdomar från previewfelet
 
-Ett previewcertifikat utfärdades, men ett misslyckat publiceringsförsök återställde Nginx-konfigurationen. Ett efterföljande SNI-test mot previewhosten visade certifikatet för `duchat.se`.
+Ett previewcertifikat utfärdades, men ett misslyckat publiceringsförsök återställde Nginx-konfigurationen. Ett efterföljande SNI-test mot previewhosten visade certifikatet för en annan host.
 
 Lärdomen är att verifiera vad rätt host faktiskt serverar efter reload och återställning. Den statiska hjälparen fick begränsade återförsök för hälsokontrollen, explicit lokal adress för HTTPS-test och egen fellogg. Certifikatvarningar ska utredas genom aktiv vhost/SNI, inte döljas genom att stänga av TLS-verifiering.
 

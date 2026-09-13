@@ -51,6 +51,6 @@ I `src/tasksheets/addition/generator.ts` ligger typer, indataalternativ och ber�
 
 ## Framtida Phoenix-koppling
 
-Mattea är frontendreferensen. En Solid-klient mot Phoenix behöver ett eget API-kontrakt, felhantering och lokal/produktionsrouting. Duchat kan ge backendexempel, men dess chatt, SMS, autentisering och externa Docker-nätverk är inte beroenden för denna skill.
+Mattea är frontendreferensen. En Solid-klient mot Phoenix behöver ett eget API-kontrakt, felhantering och lokal/produktionsrouting.
 
 Den här skillen lämnar frontendens källkod, verifieringsresultat och API-behov som underlag till kommande backend- och deployarbete. Den skapar inga serverbehörigheter eller databasinställningar.
