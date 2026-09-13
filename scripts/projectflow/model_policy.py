@@ -17,12 +17,13 @@ DEFAULT = {
               'input_per_million': 0.20, 'output_per_million': 1.20},
     'escalated': {'model': 'openai/gpt-5.6-terra', 'reasoning_effort': 'medium',
                   'input_per_million': 2.0, 'output_per_million': 12.0},
-    'max_calls': 60, 'max_escalated_calls': 20, 'reserve_budget_usd': 10.0,
+    'max_calls': 80, 'max_escalated_calls': 30, 'reserve_budget_usd': 25.0,
 }
 
-CONTINUE_CALLS = 20
-CONTINUE_ESCALATED_CALLS = 10
-CONTINUE_RESERVE_USD = 5.0
+CONTINUE_CALLS = 30
+CONTINUE_ESCALATED_CALLS = 15
+CONTINUE_RESERVE_USD = 10.0
+MAX_CONTINUATIONS = 6
 
 
 class PolicyError(RuntimeError):
@@ -39,6 +40,14 @@ def policy():
         if value[stage]['model'] == 'openai/gpt-5.4-mini':
             value[stage] = copy.deepcopy(DEFAULT[stage])
             migrated = True
+    # Raise the previous conservative defaults without overriding deliberate
+    # operator changes to the routing file.
+    if ((value.get('max_calls'), value.get('max_escalated_calls'), value.get('reserve_budget_usd'))
+            in ((60, 20, 10.0), (80, 30, 15.0))):
+        value.update(max_calls=DEFAULT['max_calls'],
+                     max_escalated_calls=DEFAULT['max_escalated_calls'],
+                     reserve_budget_usd=DEFAULT['reserve_budget_usd'])
+        migrated = True
     if value['escalated']['model'] == 'openai/gpt-5.4':
         value['escalated'] = copy.deepcopy(DEFAULT['escalated'])
         migrated = True
@@ -72,7 +81,7 @@ class ModelPolicy:
             'calls': 0, 'escalated_calls': 0, 'reserved_usd': 0.0,
             'estimated_cost_usd': 0.0, 'input_tokens': 0, 'output_tokens': 0, 'events': []}
         self.continuations = int(cfg.get('_continuations', 0))
-        if not 0 <= self.continuations <= 3:
+        if not 0 <= self.continuations <= MAX_CONTINUATIONS:
             raise PolicyError('Invalid manual continuation count.')
         # Auth/permissions merit the stronger model from the beginning. Also honor
         # escalation persisted by an earlier manually restarted build of this job.
@@ -139,8 +148,8 @@ class ModelPolicy:
         # including failed requests. This is not billed-token accounting.
         reservation = ((len(payload.encode()) + 4096) * target['input_per_million']
                        + 8192 * target['output_per_million']) / 1_000_000
-        base_calls = min(self.config['max_calls'], 14) if self.plan.get('profile') == 'static' else self.config['max_calls']
-        base_escalated = min(self.config['max_escalated_calls'], 4) if self.plan.get('profile') == 'static' else self.config['max_escalated_calls']
+        base_calls = min(self.config['max_calls'], 30) if self.plan.get('profile') == 'static' else self.config['max_calls']
+        base_escalated = min(self.config['max_escalated_calls'], 10) if self.plan.get('profile') == 'static' else self.config['max_escalated_calls']
         max_calls = base_calls + self.continuations * CONTINUE_CALLS
         max_escalated = (base_escalated +
                          self.continuations * CONTINUE_ESCALATED_CALLS)
@@ -149,7 +158,14 @@ class ModelPolicy:
         if (self.usage['calls'] >= max_calls
                 or (self.stage == 'escalated' and self.usage['escalated_calls'] >= max_escalated)
                 or self.usage['reserved_usd'] + reservation > reserve_budget):
-            raise PolicyError('The model budget or call limit has been reached. See model-usage.json; it is not reset automatically.')
+            reasons = []
+            if self.usage['calls'] >= max_calls:
+                reasons.append(f'calls {self.usage["calls"]}/{max_calls}')
+            if self.stage == 'escalated' and self.usage['escalated_calls'] >= max_escalated:
+                reasons.append(f'escalated calls {self.usage["escalated_calls"]}/{max_escalated}')
+            if self.usage['reserved_usd'] + reservation > reserve_budget:
+                reasons.append(f'reserved budget ${self.usage["reserved_usd"] + reservation:.2f}/${reserve_budget:.2f}')
+            raise PolicyError('The model budget or call limit has been reached (' + ', '.join(reasons) + '). See model-usage.json; it is not reset automatically.')
         self.usage['calls'] += 1
         self.usage['escalated_calls'] += int(self.stage == 'escalated')
         self.usage['reserved_usd'] += reservation

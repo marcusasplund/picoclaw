@@ -142,8 +142,8 @@ class Jobs:
             count = self.db.execute(
                 "SELECT COUNT(*) FROM approvals WHERE job=? AND command='continue'",
                 (job['id'],)).fetchone()[0]
-            if count >= 3:
-                raise ValueError('This job has reached its three manual continuations.')
+            if count >= 6:
+                raise ValueError('This job has reached its six manual continuations.')
             self.db.execute('INSERT INTO approvals VALUES (?,?,?,?,?,?)',
                 (event['channel'], event['event'], job['id'], 'continue', job['plan_hash'], self.owner))
             self.db.execute("UPDATE jobs SET state='queued_build',updated=? WHERE id=?",

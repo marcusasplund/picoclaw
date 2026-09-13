@@ -60,15 +60,25 @@ commands and never return a files object.
 
 Build only the approved SolidJS frontend in frontend/. This is a browser-only
 profile: there is no backend/, Elixir, API, database, Docker service, or server
-secret. Use localStorage only when persistence is requested. Keep package-lock.json
-and scripts test:types, lint, test (supporting --run), and build. Production must
+secret. The frontend template is a working application shell, not disposable
+scaffolding. First read its README.md, PRODUCT.md, DESIGN.md, App.tsx, Layout.tsx,
+AppSidebar.tsx, Header.tsx, ModeToggle.tsx, and routes. Extend the existing shell:
+keep Layout as the router root, keep the sidebar and topbar, add pages under
+src/routes, and add reusable UI under src/components. Keep App.tsx focused on
+route composition; do not put the whole app there or replace the shell with a new
+header/sidebar. A user's explicit creative direction may replace the shell only
+when the brief says so; record that decision in DESIGN.md. Preserve the theme
+switcher and responsive navigation unless the brief explicitly changes them.
+Use localStorage only when persistence is requested. Keep package-lock.json and
+scripts test:types, lint, test (supporting --run), and build. Production must
 create dist/index.html and must not use absolute external API URLs.
 
 Node 22, npm, git, curl, python3, and build tools are available. Public dependency
 downloads are allowed. Host files and credentials are unavailable. Work efficiently:
-inspect relevant files together, implement related changes together, then run all
-frontend checks together. Aim for at most three terminal turns. Keep meaningful
-behavior tests. Do not create backend/ or services outside the approved plan.
+inspect the shell and relevant files together, implement pages as route components,
+share data and UI through focused modules, then run all frontend checks together.
+Keep meaningful behavior tests. Do not create backend/ or services outside the
+approved plan.
 '''
 
 # Runs with the image's read-only Node executable. No untrusted tar is extracted.

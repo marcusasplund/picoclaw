@@ -70,8 +70,9 @@ modellåtkomst stoppar jobbet; workern faller inte tyst tillbaka till GPT-4o-min
 
 Kör `python3 ~/.picoclaw/projectflow/model_policy.py` för att skapa
 `model-routing.json` med standardvärden om filen saknas. Där kan modellval,
-prisunderlag och gränser ändras. Standard: högst 60 anrop per jobb, varav 20 med
-den starkare modellen, och en uppskattad budgetreserv på 10 USD. Varje anrop
+prisunderlag och gränser ändras. Standard: högst 80 anrop per jobb, varav 30 med
+den starkare modellen, och en uppskattad budgetreserv på 25 USD. Statiska jobb
+börjar med högst 30 anrop, varav 10 eskalerade. Varje anrop
 reserverar för promptens UTF-8-byteantal plus marginal och 8192 outputtokens.
 Detta är en konservativ uppskattning, inte uppmätt fakturering eller ett garanterat
 kostnadstak hos leverantören. Prisunderlag måste uppdateras vid modell/prisbyte.

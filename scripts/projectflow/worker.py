@@ -153,8 +153,13 @@ def build_with_agent(cfg, job, plan, root, log):
         continuation_count = ledger.continuation_count(job['id'])
         with CodeAgent({**cfg, '_continuations': continuation_count}, plan, materials,
                        run_root, log, progress, active) as agent:
-            agent.work('Build the approved app. Read the scaffold and skills, implement the features, '
-                       'and run relevant tests. Install only the dependencies this profile needs.')
+            agent.work('Build the approved app. Read the scaffold, especially the frontend README, '
+                       'PRODUCT.md, DESIGN.md, Layout.tsx, AppSidebar.tsx, Header.tsx, ModeToggle.tsx, '
+                       'App.tsx, and routes. Extend the existing shell and compose substantial behavior '
+                       'in route/component files; keep App.tsx focused on routing. Only replace the shell '
+                       'if the approved brief explicitly requests a different application shape. '
+                       'Read the skills, implement the features, and run relevant tests. Install only the '
+                       'dependencies this profile needs.')
             for attempt in range(1, 4):
                 output = run_root / ('attempt-' + str(attempt))
                 output.mkdir()

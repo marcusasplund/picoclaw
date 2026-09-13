@@ -52,12 +52,26 @@ vanlig text, utan kodformatering. Huvudkommandona är `build`, `approve`,
 svenska kommandona fungerar fortsatt som alias.
 
 Om ett genererat bygge når modellens budget- eller anropstak kan ägaren skriva
-`continue`. Varje manuellt godkännande ger högst 20 ytterligare modellanrop,
-varav högst 10 eskalerade, och $5 extra konservativ budgetreserv. Historisk
+`continue`. Varje manuellt godkännande ger högst 30 ytterligare modellanrop,
+varav högst 15 eskalerade, och $10 extra konservativ budgetreserv. Högst sex
+sådana fortsättningar tillåts per jobb. Statiska jobb börjar med högst 30 anrop
+och 10 eskalerade; övriga jobb med 80 och 30. Historisk
 användning och faktisk uppskattad kostnad nollställs inte. Högst tre sådana
 fortsättningar tillåts per jobb.
 
 ## Installation
+
+Frontendmallen väljs från `templates/application/frontend/solid-multipage`.
+Vid frysning av ett nytt jobb mappas innehållet till `frontend/`, så planering,
+kodagent och byggare använder samma projektrot. Äldre filer direkt under
+mallens `frontend/` ignoreras vid detta val. Befintliga jobb behåller sin frysta grund;
+starta en ny tråd för att använda den nya mallen.
+
+Paketering och jobbfrysning utesluter `node_modules`, `dist`, `coverage`, Git-data
+och byggcache. Låsfiler, SVG-filer och tillåtna konfigurationsfiler som
+`.oxlintrc.json`, `.gitignore` och `.impeccable/live/config.json` följer med.
+Oväntade dolda filer och symlänkar avvisas. Jobbgrunden stöder UTF-8-filer
+(inklusive SVG); binära malltillgångar kräver separat stöd.
 
 På Macen, från picoclaw-repot:
 

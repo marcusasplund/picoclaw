@@ -35,6 +35,11 @@ Add content in `src/routes/page1.tsx` and `page2.tsx`. Update route definitions
 in `src/App.tsx` and navigation in `src/components/AppSidebar.tsx` together.
 Production hosting must serve `index.html` for client-side routes.
 
+The shell is intended to be extended. Keep `Layout` as the router root, use the
+existing sidebar and topbar, and put substantial page behavior in route and
+component files. Keep `App.tsx` focused on route composition. Replace the shell
+only when the approved brief explicitly calls for a different application shape.
+
 Additional components can be installed or copied from [Solid UI](https://www.solid-ui.com/).
 Agents may add these as needed for approved features, following the current
 installation instructions and the integration guidance in `PRODUCT.md`.

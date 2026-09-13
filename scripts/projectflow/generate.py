@@ -10,6 +10,7 @@ import urllib.request
 
 from common import BASE, clean_env
 from jobs import digest
+from source_files import source_files
 
 SYSTEM = '''Du bygger fristående webbappar med SolidJS/TypeScript, Phoenix/Ecto och Postgres.
 Returnera endast JSON, ingen markdown. Använd den bifogade grunden och dess låsta beroenden.
@@ -45,10 +46,21 @@ RESERVED_GENERATED_PATHS = set(RUNTIME_FILES)
 
 def bundle():
     files = {}
-    for folder in ['templates/application', 'generation-skills']:
-        for path in sorted((BASE / folder).rglob('*')):
-            if path.is_file():
-                files[path.relative_to(BASE).as_posix()] = path.read_text()
+    # Map the selected frontend template to the stable build/deploy contract.
+    # Explicit roots also prevent old installer leftovers from entering new jobs.
+    roots = [
+        ('templates/application/backend', 'templates/application/backend'),
+        ('templates/application/frontend/solid-multipage', 'templates/application/frontend'),
+        ('generation-skills', 'generation-skills'),
+    ]
+    for folder, destination in roots:
+        root = BASE / folder
+        for path in source_files(root):
+            name = destination + '/' + path.relative_to(root).as_posix()
+            try:
+                files[name] = path.read_text(encoding='utf-8')
+            except UnicodeError as exc:
+                raise ValueError(f'Generation scaffold requires UTF-8 source assets: {name}') from exc
     if not files or not any(name.endswith('mix.lock') for name in files):
         raise ValueError('Generation scaffold is missing')
     return files

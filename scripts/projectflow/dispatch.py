@@ -96,7 +96,7 @@ def details(job):
     if usage:
         lines.extend(['Model: `' + usage.get('model', 'unknown') + '`',
                       'Calls: ' + str(usage.get('calls', 0)),
-                      'Manual continuations: ' + str(usage.get('continuations', 0)) + ' / 3',
+                      'Manual continuations: ' + str(usage.get('continuations', 0)) + ' / 6',
                       'Tokens: ' + str(usage.get('input_tokens', 0)) + ' input / ' +
                       str(usage.get('output_tokens', 0)) + ' output',
                       'Estimated cost: $' + format(usage.get('estimated_cost_usd', 0.0), '.4f')])
@@ -139,8 +139,8 @@ def describe(job):
     elif state == 'queued_build':
         lines = ['*🛠 Build queued*', '', 'The approved plan is waiting for the isolated build worker.']
         if job.get('continuation_grant'):
-            lines.extend(['', '`continue ' + str(job['continuation_grant']) + '/3` approved · '
-                          '+20 calls · +10 escalated · +$5 reserve'])
+            lines.extend(['', '`continue ' + str(job['continuation_grant']) + '/6` approved · '
+                          '+30 calls · +15 escalated · +$10 reserve'])
     elif state == 'awaiting_deploy':
         artifact = json.loads(job['artifact'])
         passed = ('Frontend checks and production packaging passed.' if artifact.get('profile') == 'static'

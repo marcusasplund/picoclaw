@@ -5,6 +5,20 @@
 Reusable product UI. Brand-specific choices should be filled from the approved
 brief. This file documents the current implementation, not a finished identity.
 
+## Evolving the visual direction
+
+All visual defaults below may evolve in response to the user's creative direction.
+For example, an 8-bit treatment may use pixel-style typography and icons, a limited
+palette, hard borders, and stepped motion. Choose details that serve the requested
+style while preserving readable text, accessible interactions, responsiveness,
+and reduced-motion alternatives.
+
+Update this document to describe the resulting design after an experiment; old
+starter choices must not pull later work back to the original appearance. Record
+the current direction, intentional departures, and relevant verification evidence
+under project-specific decisions. Impeccable reviews should assess consistency
+with that direction and report aesthetic heuristics as advisory findings.
+
 ## Layout
 
 One responsive sidebar (16rem desktop, 18rem mobile drawer), a 4rem topbar, and
@@ -34,8 +48,10 @@ No app-specific illustrations, logos, print styles, or translated copy are inclu
 ## Project-specific decisions
 
 - Brand and visual references: [fill from brief]
+- Current creative direction and intentional departures: [update as experiments evolve]
 - Product-specific components and states: [fill when requirements exist]
 - Any approved changes to palette, typography, or density: [record here]
+- Verification evidence for the current design: [record checks and remaining findings]
 
 Run Impeccable against the generated project's brief and current code. Do not
 carry reviews or product assumptions forward from the starter's source app.

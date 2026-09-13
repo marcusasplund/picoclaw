@@ -11,6 +11,8 @@ Skapa och ändra frontendkod i användarens projekt. Mattea är en referens för
 
 - Läs projektets instruktioner, `package.json`, låsfil, TypeScript-, Vite- och testkonfiguration. Identifiera appens rot; den kan vara en undermapp i ett repo.
 - Leta efter befintliga UI-primitiver, routes, teman och API-klienter innan du skapar motsvarigheter.
+- Om projektet bygger på `solid-multipage`-mallen är `Layout.tsx`, `AppSidebar.tsx`, `Header.tsx`, `ModeToggle.tsx` och route-filerna den avsedda kompositionsytan. Utöka dessa filer och skapa nya route-/komponentfiler efter behov. Lägg inte hela appen i `App.tsx` och ersätt inte skalet av bekvämlighet.
+- En uttrycklig kreativ riktning får ersätta eller omforma skalet när briefen kräver det. Dokumentera då beslutet i `DESIGN.md` och behåll verifierad funktion, tangentbordsåtkomst, responsivitet och kontrast.
 - Vid ny app: föredra SolidJS + TypeScript + Vite. Lägg till Tailwind, Kobalte, routing och ikoner efter appens behov. Mattea använder dessa, men de behöver inte alla ingå i en liten app.
 - Behåll befintliga versioner och paketmanager. Vid ny installation: verifiera kompatibla Node- och paketversioner i officiell dokumentation och spara låsfilen; kopiera inte en gammal referensapps versionsnummer som om de vore aktuell standard.
 - Läs [Matteas arbetssätt](references/mattea-patterns.md) när du behöver välja projektstruktur, komponentindelning eller testupplägg. Referensen sammanfattar relevanta delar; tillgång till Mattea-repot krävs inte.
